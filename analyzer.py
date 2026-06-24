@@ -201,7 +201,7 @@ Make sure to:
 6. Write only the Markdown report itself, no wrapping conversational text. Ensure it is clean, comprehensive, and detailed.
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-3.1-flash-lite:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = {
         "contents": [
@@ -372,7 +372,7 @@ def generate_gemini_grounding_search(query: str, spec_topic: str, api_key: str) 
     This lets the AI search Google directly, reason on real-time findings, and return a report.
     Returns a dict with "report" and "queries".
     """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-3.1-flash-lite:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     
     prompt = f"""You are a professional research assistant. Perform a real-time web search and generate a highly detailed, structured Markdown research report.

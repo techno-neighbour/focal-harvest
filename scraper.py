@@ -179,7 +179,7 @@ def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]:
         # In case of any error, fail gracefully and return empty list
         return []
 
-async def scrape_url(url: str, client: httpx.AsyncClient, timeout: int = 15) -> Dict[str, Any]:
+def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
     """
     Scrapes the target URL, extracts title, headings, meta descriptions, 
     and returns sanitized text content sorted by structural elements.
@@ -196,7 +196,7 @@ async def scrape_url(url: str, client: httpx.AsyncClient, timeout: int = 15) -> 
     }
     
     try:
-        response = await client.get(url, headers=get_headers(), timeout=timeout, follow_redirects=True)
+        response = requests.get(url, headers=get_headers(), timeout=timeout, allow_redirects=True)
         if response.status_code != 200:
             result["error"] = f"HTTP status {response.status_code}"
             return result
@@ -276,21 +276,20 @@ async def scrape_url(url: str, client: httpx.AsyncClient, timeout: int = 15) -> 
         return result
 
 async def _scrape_urls_concurrently(urls: List[str], timeout: int = 15, status_callback: Optional[Callable[[str], None]] = None) -> List[Dict[str, Any]]:
-    async with httpx.AsyncClient() as client:
-        # Wrap the call to scrape_url to also trigger the callback when done
-        async def scrape_and_notify(url):
-            res = await scrape_url(url, client, timeout)
-            if status_callback:
-                status_callback(res["url"])
-            return res
+    # Wrap the synchronous call to scrape_url in a separate thread using asyncio.to_thread
+    async def scrape_and_notify(url):
+        res = await asyncio.to_thread(scrape_url, url, timeout)
+        if status_callback:
+            status_callback(res["url"])
+        return res
 
-        tasks = [scrape_and_notify(url) for url in urls]
-        results = await asyncio.gather(*tasks)
+    tasks = [scrape_and_notify(url) for url in urls]
+    results = await asyncio.gather(*tasks)
     return results
 
 def scrape_urls_concurrently(urls: List[str], timeout: int = 15, status_callback: Optional[Callable[[str], None]] = None) -> List[Dict[str, Any]]:
     """
-    Scrape multiple URLs concurrently using asyncio and httpx.
+    Scrape multiple URLs concurrently using asyncio and requests in a thread pool.
     """
     return asyncio.run(_scrape_urls_concurrently(urls, timeout, status_callback))
 
