@@ -3,6 +3,7 @@ import requests
 import httpx
 import asyncio
 from bs4 import BeautifulSoup
+from readability import Document
 import time
 import random
 import os
@@ -206,35 +207,24 @@ def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
             result["error"] = f"Unsupported content type: {content_type}"
             return result
             
-        soup = BeautifulSoup(response.text, 'html.parser')
-        result["success"] = True
+        # Parse full document with BeautifulSoup first to get meta description
+        full_soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Get Title
-        if soup.title:
-            result["title"] = soup.title.get_text().strip()
-            
         # Get Meta Description
-        meta_desc = soup.find('meta', attrs={'name': 'description'}) or soup.find('meta', attrs={'property': 'og:description'})
+        meta_desc = full_soup.find('meta', attrs={'name': 'description'}) or full_soup.find('meta', attrs={'property': 'og:description'})
         if meta_desc and meta_desc.get('content'):
             result["meta_description"] = meta_desc['content'].strip()
             
-        # Clean HTML of non-content elements
-        for element in soup(["script", "style", "nav", "footer", "header", "aside", "form", "iframe", "noscript", "svg"]):
-            element.decompose()
-            
-        # Try to find primary container
-        container = None
-        for selector in ['article', 'main', '[role="main"]', '.post', '.article', '.entry', '.content', '#content', '#main']:
-            found = soup.select(selector)
-            if found:
-                # Use the first match that contains substantial content
-                best_match = max(found, key=lambda el: len(el.get_text()))
-                if len(best_match.get_text()) > 300:
-                    container = best_match
-                    break
+        # Use python-readability to extract structural content and strip out layout garbage
+        doc = Document(response.text)
+
+        # Get Title
+        result["title"] = doc.title()
         
-        if not container:
-            container = soup.body if soup.body else soup
+        # Parse the sanitized summary output from readability
+        summary_html = doc.summary()
+        container = BeautifulSoup(summary_html, 'html.parser')
+        result["success"] = True
             
         # Extract headings and paragraphs in order of appearance
         extracted_headings = []
