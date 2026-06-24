@@ -269,11 +269,13 @@ def execute_scrape_flow(query: str, spec_topic: str, urls: List[str], config: Di
         
     # Phase 2: Scrape URLs
     with console.status("[bold cyan]Fetching and parsing target websites...[/bold cyan]") as status:
-        for idx, url in enumerate(target_urls):
-            status.update(f"[bold cyan]({idx+1}/{len(target_urls)}) Scraping: {url[:60]}...[/bold cyan]")
-            scrape_res = scraper.scrape_url(url)
-            scraped_data.append(scrape_res)
-            time.sleep(0.5)
+        scraped_count = [0]
+
+        def update_status(url: str):
+            scraped_count[0] += 1
+            status.update(f"[bold cyan]({scraped_count[0]}/{len(target_urls)}) Finished Scraping: {url[:60]}...[/bold cyan]")
+
+        scraped_data = scraper.scrape_urls_concurrently(target_urls, timeout=15, status_callback=update_status)
             
     # Print scraping summary
     table = Table(title="📊 Scraping Completion Status", border_style="cyan")
