@@ -1,10 +1,12 @@
 import urllib.parse
 import requests
+import httpx
+import asyncio
 from bs4 import BeautifulSoup
 import time
 import random
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Callable, Optional
 
 # List of common User-Agents to avoid scraping detection
 USER_AGENTS = [
@@ -177,7 +179,7 @@ def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]:
         # In case of any error, fail gracefully and return empty list
         return []
 
-def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
+async def scrape_url(url: str, client: httpx.AsyncClient, timeout: int = 15) -> Dict[str, Any]:
     """
     Scrapes the target URL, extracts title, headings, meta descriptions, 
     and returns sanitized text content sorted by structural elements.
@@ -194,7 +196,7 @@ def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
     }
     
     try:
-        response = requests.get(url, headers=get_headers(), timeout=timeout, allow_redirects=True)
+        response = await client.get(url, headers=get_headers(), timeout=timeout, follow_redirects=True)
         if response.status_code != 200:
             result["error"] = f"HTTP status {response.status_code}"
             return result
@@ -273,6 +275,25 @@ def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
         result["error"] = str(e)
         return result
 
+async def _scrape_urls_concurrently(urls: List[str], timeout: int = 15, status_callback: Optional[Callable[[str], None]] = None) -> List[Dict[str, Any]]:
+    async with httpx.AsyncClient() as client:
+        # Wrap the call to scrape_url to also trigger the callback when done
+        async def scrape_and_notify(url):
+            res = await scrape_url(url, client, timeout)
+            if status_callback:
+                status_callback(res["url"])
+            return res
+
+        tasks = [scrape_and_notify(url) for url in urls]
+        results = await asyncio.gather(*tasks)
+    return results
+
+def scrape_urls_concurrently(urls: List[str], timeout: int = 15, status_callback: Optional[Callable[[str], None]] = None) -> List[Dict[str, Any]]:
+    """
+    Scrape multiple URLs concurrently using asyncio and httpx.
+    """
+    return asyncio.run(_scrape_urls_concurrently(urls, timeout, status_callback))
+
 # Simple test block
 if __name__ == "__main__":
     print("Testing Search...")
@@ -287,7 +308,7 @@ if __name__ == "__main__":
         
     if search_res:
         print(f"Testing Scraping {search_res[0]['url']}...")
-        scrape_res = scrape_url(search_res[0]['url'])
+        scrape_res = scrape_urls_concurrently([search_res[0]['url']])[0]
         print(f"Success: {scrape_res['success']}")
         title_safe = scrape_res['title'].encode('ascii', 'replace').decode('ascii')
         print(f"Title: {title_safe}")
