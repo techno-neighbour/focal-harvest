@@ -207,7 +207,12 @@ def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
             result["error"] = f"Unsupported content type: {content_type}"
             return result
             
-        # Parse full document with BeautifulSoup first to get meta description
+        # Check if response body is empty or whitespace
+        if not response.text or not response.text.strip():
+            result["error"] = "Empty response body"
+            return result
+
+        # Parse full document with BeautifulSoup first to get meta description and prepare fallback
         full_soup = BeautifulSoup(response.text, 'html.parser')
         
         # Get Meta Description
@@ -215,50 +220,115 @@ def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
         if meta_desc and meta_desc.get('content'):
             result["meta_description"] = meta_desc['content'].strip()
             
-        # Use python-readability to extract structural content and strip out layout garbage
-        doc = Document(response.text)
+        # Get Title from full_soup by default
+        if full_soup.title:
+            result["title"] = full_soup.title.get_text().strip()
 
-        # Get Title
-        result["title"] = doc.title()
+        # Try using python-readability to extract clean article content
+        readability_text = ""
+        readability_headings = []
+        readability_paragraphs = []
         
-        # Parse the sanitized summary output from readability
-        summary_html = doc.summary()
-        container = BeautifulSoup(summary_html, 'html.parser')
+        try:
+            doc = Document(response.text)
+            readability_title = doc.title().strip()
+            if readability_title:
+                result["title"] = readability_title
+                
+            summary_html = doc.summary()
+            container = BeautifulSoup(summary_html, 'html.parser')
+            
+            # Extract headings and paragraphs from readability output
+            extracted_headings = []
+            extracted_paragraphs = []
+            all_text_blocks = []
+            
+            for element in container.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li']):
+                text = element.get_text().strip()
+                if len(text) < 10:
+                    continue
+                    
+                tag_name = element.name
+                if tag_name.startswith('h'):
+                    level = int(tag_name[1])
+                    heading_info = {"level": level, "text": text}
+                    extracted_headings.append(heading_info)
+                    all_text_blocks.append(f"\n##{ '#' * (level-1) } {text}\n")
+                else:
+                    extracted_paragraphs.append(text)
+                    all_text_blocks.append(text)
+                    
+            raw_text = "\n\n".join(all_text_blocks)
+            if not raw_text.strip():
+                text = container.get_text(separator='\n')
+                lines = [line.strip() for line in text.splitlines() if len(line.strip()) > 15]
+                raw_text = "\n\n".join(lines)
+                extracted_paragraphs = lines
+                
+            readability_text = raw_text
+            readability_headings = extracted_headings
+            readability_paragraphs = extracted_paragraphs
+        except Exception:
+            # Fall back to BeautifulSoup if readability fails or raises ParserError
+            pass
+
+        # Check if readability succeeded in finding a reasonable amount of structured content
+        # For non-article pages (directories, tables, indices like Hacker News/GitHub),
+        # readability is highly prone to extracting 0 or very few characters.
+        if len(readability_text.strip()) > 200:
+            result["headings"] = readability_headings
+            result["paragraphs"] = readability_paragraphs
+            result["raw_text"] = readability_text
+        else:
+            # Fall back to standard BeautifulSoup cleaning of full document
+            soup_copy = BeautifulSoup(response.text, 'html.parser')
+            for element in soup_copy(["script", "style", "nav", "footer", "header", "aside", "form", "iframe", "noscript", "svg"]):
+                element.decompose()
+                
+            # Try to find primary container
+            container = None
+            for selector in ['article', 'main', '[role="main"]', '.post', '.article', '.entry', '.content', '#content', '#main']:
+                found = soup_copy.select(selector)
+                if found:
+                    best_match = max(found, key=lambda el: len(el.get_text()))
+                    if len(best_match.get_text()) > 300:
+                        container = best_match
+                        break
+            
+            if not container:
+                container = soup_copy.body if soup_copy.body else soup_copy
+                
+            extracted_headings = []
+            extracted_paragraphs = []
+            all_text_blocks = []
+            
+            for element in container.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li']):
+                text = element.get_text().strip()
+                if len(text) < 10:
+                    continue
+                    
+                tag_name = element.name
+                if tag_name.startswith('h'):
+                    level = int(tag_name[1])
+                    heading_info = {"level": level, "text": text}
+                    extracted_headings.append(heading_info)
+                    all_text_blocks.append(f"\n##{ '#' * (level-1) } {text}\n")
+                else:
+                    extracted_paragraphs.append(text)
+                    all_text_blocks.append(text)
+                    
+            raw_text = "\n\n".join(all_text_blocks)
+            if not raw_text.strip():
+                text = container.get_text(separator='\n')
+                lines = [line.strip() for line in text.splitlines() if len(line.strip()) > 15]
+                raw_text = "\n\n".join(lines)
+                extracted_paragraphs = lines
+                
+            result["headings"] = extracted_headings
+            result["paragraphs"] = extracted_paragraphs
+            result["raw_text"] = raw_text
+
         result["success"] = True
-            
-        # Extract headings and paragraphs in order of appearance
-        extracted_headings = []
-        extracted_paragraphs = []
-        all_text_blocks = []
-        
-        for element in container.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li']):
-            text = element.get_text().strip()
-            # Filter out short menu items or navigation artifacts
-            if len(text) < 10:
-                continue
-                
-            tag_name = element.name
-            if tag_name.startswith('h'):
-                level = int(tag_name[1])
-                heading_info = {"level": level, "text": text}
-                extracted_headings.append(heading_info)
-                all_text_blocks.append(f"\n##{ '#' * (level-1) } {text}\n")
-            else:
-                extracted_paragraphs.append(text)
-                all_text_blocks.append(text)
-                
-        result["headings"] = extracted_headings
-        result["paragraphs"] = extracted_paragraphs
-        result["raw_text"] = "\n\n".join(all_text_blocks)
-        
-        # If no structured content was found, fall back to basic text extraction
-        if not result["raw_text"].strip():
-            # Get text from container directly
-            text = container.get_text(separator='\n')
-            lines = [line.strip() for line in text.splitlines() if len(line.strip()) > 15]
-            result["raw_text"] = "\n\n".join(lines)
-            result["paragraphs"] = lines
-            
         return result
         
     except Exception as e:
