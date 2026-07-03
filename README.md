@@ -137,6 +137,7 @@ sequenceDiagram
 
 ### Folder Layout
 ```text
+├── install.py            # Platform-independent dependency setup wrapper
 ├── config_manager.py     # Reads and writes config.json
 ├── scraper.py            # DuckDuckGo/Tavily search, concurrent crawler, HTML parser
 ├── analyzer.py           # LLM request logic and offline local summarizer
@@ -153,10 +154,11 @@ sequenceDiagram
 ## ⚡ Quick Start
 
 ### 1. Install Dependencies
-Ensure you have Python 3.12+ installed. Clone the repository and run:
+Ensure you have Python 3.12+ installed. Run the platform-independent installer to set up core requirements and automatically attempt optional bypass enhancements (like `curl_cffi`):
 ```bash
-pip install -r requirements.txt
+python install.py
 ```
+*(Alternatively, you can run `pip install -r requirements.txt` for a standard manual installation).*
 
 ### 2. Launch the Application
 Run the interactive CLI controller:
