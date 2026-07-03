@@ -3,6 +3,7 @@ import json
 import datetime
 import requests
 from typing import List, Dict, Any
+import utils
 from rich.console import Console
 from rich.markdown import Markdown
 
@@ -94,7 +95,7 @@ def send_discord_webhook(webhook_url: str, query: str, spec_topic: str, markdown
     }
     
     try:
-        res = requests.post(webhook_url, json=payload, timeout=10)
+        res = utils.safe_request("post", webhook_url, json=payload, timeout=10)
         return res.status_code in (200, 204)
     except Exception as e:
         console.print(f"[bold red]Failed to send Discord webhook: {str(e)}[/bold red]")
@@ -121,7 +122,7 @@ def send_telegram_notification(token: str, chat_id: str, query: str, spec_topic:
     }
     
     try:
-        res = requests.post(url, json=payload, timeout=10)
+        res = utils.safe_request("post", url, json=payload, timeout=10)
         return res.status_code == 200
     except Exception as e:
         console.print(f"[bold red]Failed to send Telegram notification: {str(e)}[/bold red]")

@@ -4,6 +4,7 @@ import requests
 from typing import List, Dict, Any, Set
 from collections import Counter
 import math
+import utils
 
 # A basic list of stop words to filter out during keyword analysis
 STOP_WORDS = {
@@ -218,7 +219,7 @@ Make sure to:
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        response = utils.safe_request("post", url, json=payload, headers=headers, timeout=30)
         if response.status_code == 200:
             res_json = response.json()
             text = res_json['candidates'][0]['content']['parts'][0]['text']
@@ -268,7 +269,7 @@ Ensure you add a 'Sources Scraped' table at the end and dynamically cite sources
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        response = utils.safe_request("post", url, json=payload, headers=headers, timeout=30)
         if response.status_code == 200:
             res_json = response.json()
             return res_json['choices'][0]['message']['content']
@@ -319,7 +320,7 @@ Ensure you add a 'Sources Scraped' table at the end and dynamically cite sources
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        response = utils.safe_request("post", url, json=payload, headers=headers, timeout=30)
         if response.status_code == 200:
             res_json = response.json()
             return res_json['content'][0]['text']
@@ -408,7 +409,7 @@ Make sure to:
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=45)
+        response = utils.safe_request("post", url, json=payload, headers=headers, timeout=45)
         if response.status_code == 200:
             res_json = response.json()
             candidate = res_json['candidates'][0]

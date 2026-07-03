@@ -15,6 +15,9 @@ DEFAULT_CONFIG = {
     "telegram_token": "",
     "telegram_chat_id": "",
     "default_max_results": 5,
+    "max_retries": 3,
+    "backoff_factor": 1.0,
+    "retry_on_status_codes": [429, 500, 502, 503, 504],
     "saved_searches": []
 }
 

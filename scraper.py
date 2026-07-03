@@ -8,6 +8,7 @@ import time
 import random
 import os
 from typing import List, Dict, Any, Callable, Optional
+import utils
 
 # List of common User-Agents to avoid scraping detection
 USER_AGENTS = [
@@ -50,7 +51,7 @@ def search_tavily(query: str, api_key: str, max_results: int = 5) -> List[Dict[s
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        response = utils.safe_request("post", url, json=payload, headers=headers, timeout=15)
         if response.status_code == 200:
             res_json = response.json()
             results = []
@@ -93,11 +94,11 @@ def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
     
     try:
-        response = requests.get(url, headers=get_headers(), timeout=15)
+        response = utils.safe_request("get", url, headers=get_headers(), timeout=15)
         if response.status_code != 200:
             # Try a fallback URL (Lite interface)
             url_lite = f"https://lite.duckduckgo.com/lite/"
-            response = requests.post(url_lite, data={"q": query}, headers=get_headers(), timeout=15)
+            response = utils.safe_request("post", url_lite, data={"q": query}, headers=get_headers(), timeout=15)
             if response.status_code != 200:
                 return []
                 
@@ -197,7 +198,7 @@ def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
     }
     
     try:
-        response = requests.get(url, headers=get_headers(), timeout=timeout, allow_redirects=True)
+        response = utils.safe_request("get", url, headers=get_headers(), timeout=timeout, allow_redirects=True)
         if response.status_code != 200:
             result["error"] = f"HTTP status {response.status_code}"
             return result
