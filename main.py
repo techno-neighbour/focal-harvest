@@ -292,7 +292,13 @@ def execute_scrape_flow(query: str, spec_topic: str, urls: List[str], config: Di
     table.add_column("Content Length", style="magenta")
     
     for idx, data in enumerate(scraped_data):
-        success_str = "[green]SUCCESS[/green]" if data["success"] else f"[red]FAILED ({data.get('error')})[/red]"
+        if not data["success"]:
+            success_str = f"[red]FAILED ({data.get('error')})[/red]"
+        elif data.get("cached"):
+            success_str = "[cyan]SUCCESS (CACHED)[/cyan]"
+        else:
+            success_str = "[green]SUCCESS (LIVE)[/green]"
+            
         char_count = len(data.get("raw_text", ""))
         table.add_row(str(idx + 1), data["url"][:60] + "...", success_str, f"{char_count} chars")
         

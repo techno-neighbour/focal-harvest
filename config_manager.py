@@ -18,6 +18,8 @@ DEFAULT_CONFIG = {
     "max_retries": 3,
     "backoff_factor": 1.0,
     "retry_on_status_codes": [429, 500, 502, 503, 504],
+    "cache_enabled": True,
+    "cache_expiration_hours": 24,
     "saved_searches": []
 }
 

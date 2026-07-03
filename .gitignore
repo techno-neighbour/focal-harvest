@@ -5,7 +5,7 @@ config.json
 # Generated Scraper Reports & Raw Data
 reports/
 raw_data/
-
+errors/
 # Python Cache & Bytecode
 __pycache__/
 *.pyc

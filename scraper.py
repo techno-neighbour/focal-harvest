@@ -9,6 +9,9 @@ import random
 import os
 from typing import List, Dict, Any, Callable, Optional
 import utils
+import hashlib
+import datetime
+import json
 
 # List of common User-Agents to avoid scraping detection
 USER_AGENTS = [
@@ -21,17 +24,31 @@ USER_AGENTS = [
 
 def get_headers() -> Dict[str, str]:
     """Generates random headers to mimic a normal browser request."""
+    ua = random.choice(USER_AGENTS)
+    
+    # Match client hints to the selected user-agent
+    if "Chrome/120" in ua:
+        ch_ua = '"Not A(Brand";v="99", "Google Chrome";v="120", "Chromium";v="120"'
+    elif "Chrome/119" in ua:
+        ch_ua = '"Not A(Brand";v="99", "Google Chrome";v="119", "Chromium";v="119"'
+    else:
+        ch_ua = '"Not A(Brand";v="99", "Chromium";v="120"'
+
     return {
-        "User-Agent": random.choice(USER_AGENTS),
+        "User-Agent": ua,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Site": "cross-site",
         "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0"
+        "Cache-Control": "max-age=0",
+        "Referer": "https://www.google.com/",
+        "sec-ch-ua": ch_ua,
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"'
     }
 
 def search_tavily(query: str, api_key: str, max_results: int = 5) -> List[Dict[str, str]]:
@@ -181,7 +198,80 @@ def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]:
         # In case of any error, fail gracefully and return empty list
         return []
 
+CACHE_DIR = "reports/cache"
+
+def get_cache_filepath(url: str) -> str:
+    """Generates the local cache filepath for a given URL using its MD5 hash."""
+    url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
+    return os.path.join(CACHE_DIR, f"{url_hash}.json")
+
+def load_cached_url(url: str, expiration_hours: int) -> Optional[Dict[str, Any]]:
+    """Loads a cached scraping result from disk if it exists and is not expired."""
+    filepath = get_cache_filepath(url)
+    if not os.path.exists(filepath):
+        return None
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            cached_data = json.load(f)
+            
+        timestamp_str = cached_data.get("timestamp")
+        if not timestamp_str:
+            return None
+            
+        cached_time = datetime.datetime.fromisoformat(timestamp_str)
+        now = datetime.datetime.now()
+        age = now - cached_time
+        
+        if age.total_seconds() > expiration_hours * 3600:
+            return None # Expired
+            
+        return cached_data.get("scraped_dict")
+    except Exception:
+        return None
+
+def save_cached_url(url: str, scraped_dict: Dict[str, Any]) -> None:
+    """Saves a successful scraping result to the local cache directory."""
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        filepath = get_cache_filepath(url)
+        payload = {
+            "url": url,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "scraped_dict": scraped_dict
+        }
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
 def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
+    """
+    Scrapes the target URL, checking local cache first.
+    """
+    try:
+        import config_manager
+        config = config_manager.load_config()
+        cache_enabled = config.get("cache_enabled", True)
+        cache_expire_hours = config.get("cache_expiration_hours", 24)
+    except Exception:
+        cache_enabled = True
+        cache_expire_hours = 24
+
+    if cache_enabled:
+        cached = load_cached_url(url, cache_expire_hours)
+        if cached:
+            cached["cached"] = True
+            return cached
+
+    result = _perform_scrape_url(url, timeout)
+    result["cached"] = False
+
+    if cache_enabled and result.get("success"):
+        save_cached_url(url, result)
+
+    return result
+
+def _perform_scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
     """
     Scrapes the target URL, extracts title, headings, meta descriptions, 
     and returns sanitized text content sorted by structural elements.

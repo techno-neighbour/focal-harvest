@@ -94,11 +94,15 @@ Here is a real example of the structured Markdown report generated when research
 
 ### 🔍 Research & Crawling
 * **Orchestrated Search**: Choose between the AI-optimized Tavily Search API or a lightweight DuckDuckGo crawler fallback.
-* **Parallel Scraper**: Crawls multiple target URLs concurrently in threads to bypass anti-bot throttling.
+* **Resilient Request Wrapper**: All HTTP calls flow through a custom wrapper implementing configurable retry limits, exponential backoff, random jitter (to avoid stampeding servers), and fail-fast timeouts on tarpitted connections.
+* **Parallel Scraper**: Crawls multiple target URLs concurrently in threads to speed up sweeps.
+* **Optional 403 Bypass (`curl_cffi`)**: Native optional support for `curl_cffi`. If installed, the crawler impersonates Google Chrome's TLS/JA3 fingerprints to bypass Akamai and Cloudflare `403 Forbidden` bot-detection gates.
 
 ### 🧹 Cleaning & Parsing
 * **Hybrid Parser**: Uses `readability-lxml` to extract clean, layout-stripped article content. Automatically falls back to full-soup structural cleaning on directory index pages (like Hacker News or GitHub) to prevent data loss.
-* **Anti-Bot Resilience**: Randomizes browser User-Agents and headers to avoid request throttling and `403 Forbidden` failures.
+* **Local-First Caching**: Scraped pages are saved locally to `reports/cache/` using URL MD5 hashes. Subsequent requests load instantly from disk (bypassing the web completely to save network bandwidth and search credits).
+* **Terminal Cache Feedback**: Displays cache status indicators directly in the scraping table (`SUCCESS (CACHED)` in cyan vs `SUCCESS (LIVE)` in green).
+* **Anti-Bot Resilience**: Randomizes browser User-Agents and sends standard Google search referrers and Client Hints (`sec-ch-ua`) to mimic natural browser navigation.
 
 ### 🧠 Intelligence & Synthesis
 * **Multi-LLM Integrations**: Connects directly to Gemini 1.5 Flash, Claude 3.5 Sonnet, or GPT-4o-mini via REST endpoints.
@@ -137,9 +141,11 @@ sequenceDiagram
 ├── scraper.py            # DuckDuckGo/Tavily search, concurrent crawler, HTML parser
 ├── analyzer.py           # LLM request logic and offline local summarizer
 ├── notifier.py           # Markdown styling, JSON storage, Discord/Telegram webhooks
+├── utils.py              # Resilient safe_request HTTP wrapper with retries
 ├── main.py               # ASCII visual interface and main loop controller
 ├── requirements.txt      # Python library dependencies
-└── WALKTHROUGH.md        # Step-by-step example execution walkthrough
+├── WALKTHROUGH.md        # Step-by-step example execution walkthrough
+└── tests/                # Automated unit and mock test suite
 ```
 
 ---
@@ -158,7 +164,13 @@ Run the interactive CLI controller:
 python main.py
 ```
 
-### 3. Check Out the Walkthrough
+### 3. Run Automated Tests
+Execute the unit test suite to verify application stability and mock request flows:
+```bash
+python -m unittest discover -s tests
+```
+
+### 4. Check Out the Walkthrough
 For a detailed guided tour of the CLI menus using a live example, read the [WALKTHROUGH.md](WALKTHROUGH.md) guide.
 
 ---
@@ -168,6 +180,21 @@ For a detailed guided tour of the CLI menus using a live example, read the [WALK
 Focal Harvest can be configured in two ways:
 * **Option A (In-App)**: Run `python main.py`, select Option **`3`** (`Configure API Keys & Settings`), and paste your credentials directly. These are saved to a local `config.json`.
 * **Option B (Environment Variables)**: Export standard keys (e.g. `GEMINI_API_KEY`, `TAVILY_API_KEY`, `DISCORD_WEBHOOK_URL`) in your terminal session or write them to a local `.env` file.
+
+### ⚙️ Customizable Pipeline Parameters
+Once `config.json` is generated, you can fine-tune the request pipeline and cache behavior:
+* `"max_retries"`: Maximum retry attempts for failed requests (default: `3`).
+* `"backoff_factor"`: Base multiplier for exponential backoff sleep times (default: `1.0`).
+* `"retry_on_status_codes"`: Array of HTTP status codes to retry on (default: `[429, 500, 502, 503, 504]`).
+* `"cache_enabled"`: Enable/disable local file caching (default: `true`).
+* `"cache_expiration_hours"`: Cache age limit before performing a fresh download (default: `24`).
+
+### 💡 Optional: Bypassing Cloudflare/Akamai 403 blocks
+If you scrape highly protected e-commerce or documentation portals and hit `403 Forbidden` blocks, you can install the optional C-compiled TLS impersonation library:
+```bash
+pip install curl_cffi
+```
+Once installed, Focal Harvest will automatically route requests through `curl_cffi` to mimic Google Chrome's JA3 signatures and connection layouts, bypassing most cloud firewalls.
 
 ---
 

@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, mock_open
 import urllib.parse
 import sys
 import os
@@ -83,8 +83,10 @@ class TestScraper(unittest.TestCase):
         self.assertEqual(results[0]["url"], "http://realpython.com")
         self.assertEqual(results[0]["snippet"], "Learn Python online with our tutorials.")
 
+    @patch('config_manager.load_config')
     @patch('requests.get')
-    def test_scrape_url_article(self, mock_get):
+    def test_scrape_url_article(self, mock_get, mock_config):
+        mock_config.return_value = {"cache_enabled": False}
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.headers = {"content-type": "text/html"}
@@ -115,8 +117,10 @@ class TestScraper(unittest.TestCase):
         self.assertEqual(res["headings"][0]["text"], "The Future of AI")
         self.assertEqual(res["headings"][1]["text"], "Deep Learning")
 
+    @patch('config_manager.load_config')
     @patch('requests.get')
-    def test_scrape_url_empty_or_error(self, mock_get):
+    def test_scrape_url_empty_or_error(self, mock_get, mock_config):
+        mock_config.return_value = {"cache_enabled": False}
         # Empty body test
         mock_resp_empty = MagicMock()
         mock_resp_empty.status_code = 200
@@ -155,6 +159,78 @@ class TestScraper(unittest.TestCase):
         self.assertEqual(results[0]["url"], "http://a.com")
         self.assertEqual(results[1]["url"], "http://b.com")
         self.assertEqual(set(callback_urls), set(urls))
+
+    def test_get_cache_filepath(self):
+        url = "http://example.com/test-url"
+        path = scraper.get_cache_filepath(url)
+        self.assertTrue(path.startswith("reports/cache"))
+        self.assertTrue(path.endswith(".json"))
+
+    @patch('os.makedirs')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_save_cached_url(self, mock_file, mock_makedirs):
+        url = "http://test-cache.com"
+        scraped_dict = {"url": url, "success": True, "title": "Cache Title"}
+        
+        scraper.save_cached_url(url, scraped_dict)
+        mock_makedirs.assert_called_once_with("reports/cache", exist_ok=True)
+        self.assertTrue(mock_file.called)
+
+    @patch('os.path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_load_cached_url_valid(self, mock_file, mock_exists):
+        mock_exists.return_value = True
+        url = "http://test-cache.com"
+        import datetime
+        import json
+        
+        timestamp = datetime.datetime.now().isoformat()
+        scraped_dict = {"url": url, "success": True, "title": "Cache Title"}
+        cached_data = {
+            "url": url,
+            "timestamp": timestamp,
+            "scraped_dict": scraped_dict
+        }
+        mock_file.return_value.read.return_value = json.dumps(cached_data)
+        
+        result = scraper.load_cached_url(url, expiration_hours=24)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["title"], "Cache Title")
+
+    @patch('os.path.exists')
+    @patch('builtins.open', new_callable=mock_open)
+    def test_load_cached_url_expired(self, mock_file, mock_exists):
+        mock_exists.return_value = True
+        url = "http://test-cache.com"
+        import datetime
+        import json
+        
+        # Expired: 25 hours ago
+        timestamp = (datetime.datetime.now() - datetime.timedelta(hours=25)).isoformat()
+        scraped_dict = {"url": url, "success": True, "title": "Cache Title"}
+        cached_data = {
+            "url": url,
+            "timestamp": timestamp,
+            "scraped_dict": scraped_dict
+        }
+        mock_file.return_value.read.return_value = json.dumps(cached_data)
+        
+        result = scraper.load_cached_url(url, expiration_hours=24)
+        self.assertIsNone(result)
+
+    @patch('scraper.load_cached_url')
+    @patch('scraper._perform_scrape_url')
+    @patch('config_manager.load_config')
+    def test_scrape_url_cache_hit(self, mock_load_config, mock_perform, mock_load_cache):
+        mock_load_config.return_value = {"cache_enabled": True, "cache_expiration_hours": 24}
+        mock_load_cache.return_value = {"title": "Cached Title", "success": True}
+        
+        # Call scrape_url
+        res = scraper.scrape_url("http://example.com")
+        self.assertEqual(res["title"], "Cached Title")
+        
+        # Verify _perform_scrape_url was NOT called
+        mock_perform.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()
