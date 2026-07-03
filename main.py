@@ -1,3 +1,10 @@
+import warnings
+try:
+    from requests.exceptions import RequestsDependencyWarning
+    warnings.filterwarnings("ignore", category=RequestsDependencyWarning)
+except ImportError:
+    pass
+
 import os
 import sys
 import time
