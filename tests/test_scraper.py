@@ -232,5 +232,87 @@ class TestScraper(unittest.TestCase):
         # Verify _perform_scrape_url was NOT called
         mock_perform.assert_not_called()
 
+    def test_parse_sitemap_xml(self):
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+           <url>
+              <loc>http://www.example.com/page1</loc>
+              <lastmod>2026-01-01</lastmod>
+           </url>
+           <url>
+              <loc>http://www.example.com/page2</loc>
+           </url>
+        </urlset>
+        """
+        urls = scraper._parse_sitemap_xml(xml_content, max_urls=5)
+        self.assertEqual(len(urls), 2)
+        self.assertEqual(urls[0], "http://www.example.com/page1")
+        self.assertEqual(urls[1], "http://www.example.com/page2")
+
+    @patch('utils.safe_request')
+    def test_scan_sitemap_urls_success(self, mock_request):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "<url><loc>http://example.com/item</loc></url>"
+        mock_request.return_value = mock_resp
+        
+        urls = scraper.scan_sitemap_urls("example.com")
+        self.assertEqual(len(urls), 1)
+        self.assertEqual(urls[0], "http://example.com/item")
+
+    @patch('requests.get')
+    def test_fetch_wayback_cache_success(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.url = "http://web.archive.org/web/123/http://facebook.com/post"
+        mock_resp.text = "<html><div id='wm-ipp'>Wayback Toolbar</div><body>Actual Post</body></html>"
+        mock_get.return_value = mock_resp
+        
+        html = scraper._fetch_wayback_cache("http://facebook.com/post")
+        self.assertEqual(html, mock_resp.text)
+        
+        clean = scraper._clean_wayback_html(html)
+        self.assertNotIn("wm-ipp", clean)
+        self.assertIn("Actual Post", clean)
+
+    @patch('scraper._search_google_mobile')
+    @patch('scraper.search_duckduckgo')
+    def test_search_aggregated(self, mock_ddg, mock_google):
+        mock_google.return_value = [{"title": "Google Title", "url": "http://test.com/1", "snippet": "Google"}]
+        mock_ddg.return_value = [{"title": "DDG Title", "url": "http://test.com/2", "snippet": "DDG"}]
+        
+        results = scraper.search_aggregated("test", max_results=5)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["url"], "http://test.com/1")
+        self.assertEqual(results[1]["url"], "http://test.com/2")
+
+    @patch('scraper.scrape_url')
+    def test_scrape_urls_adaptive_replenishes(self, mock_scrape):
+        def mock_side_effect(url, timeout, fallback_snippet=""):
+            if url == "http://a.com":
+                return {"url": url, "success": False, "raw_text": "", "error": "Timeout"}
+            elif url == "http://b.com":
+                return {"url": url, "success": True, "title": "B", "raw_text": "Highly informative article content here."}
+            elif url == "http://c.com":
+                return {"url": url, "success": True, "title": "C", "raw_text": "Another rich and detailed article content."}
+            return {"url": url, "success": False, "raw_text": ""}
+            
+        mock_scrape.side_effect = mock_side_effect
+        
+        candidates = [
+            {"url": "http://a.com", "snippet": "A snippet"},
+            {"url": "http://b.com", "snippet": "B snippet"},
+            {"url": "http://c.com", "snippet": "C snippet"}
+        ]
+        
+        results = scraper.scrape_urls_adaptive(candidates, target_count=2, timeout=5)
+        
+        # Verify it successfully replenished and returned the 2 rich sites (b and c)
+        self.assertEqual(len(results), 2)
+        urls_returned = [r["url"] for r in results]
+        self.assertIn("http://b.com", urls_returned)
+        self.assertIn("http://c.com", urls_returned)
+        self.assertNotIn("http://a.com", urls_returned)
+
 if __name__ == '__main__':
     unittest.main()

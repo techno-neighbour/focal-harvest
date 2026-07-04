@@ -258,17 +258,19 @@ def execute_scrape_flow(query: str, spec_topic: str, urls: List[str], config: Di
         tavily_key = config.get("tavily_api_key") or os.environ.get("TAVILY_API_KEY")
         engine_name = "Tavily Search API" if (search_engine == "tavily" and tavily_key) else "DuckDuckGo"
         
+        # Query for a larger candidate pool to support Adaptive Replenishment
+        candidate_pool_size = max_res * 3
         with console.status(f"[bold cyan]Searching {engine_name} for: '{query}'...[/bold cyan]"):
             if engine_name == "Tavily Search API":
-                search_results = scraper.search_tavily(query, tavily_key, max_results=max_res)
+                search_results = scraper.search_tavily(query, tavily_key, max_results=candidate_pool_size)
             else:
-                search_results = scraper.search_duckduckgo(query, max_results=max_res)
+                search_results = scraper.search_duckduckgo(query, max_results=candidate_pool_size)
             
         if not search_results:
             console.print("[bold red]❌ No search results found. Check connection or try another topic.[/bold red]")
             return ""
             
-        console.print(f"[green]✔ Found {len(search_results)} search results via {engine_name}.[/green]")
+        console.print(f"[green]✔ Found {len(search_results)} candidate search results via {engine_name}.[/green]")
         target_urls = [r["url"] for r in search_results]
     else:
         target_urls = urls
@@ -280,9 +282,10 @@ def execute_scrape_flow(query: str, spec_topic: str, urls: List[str], config: Di
 
         def update_status(url: str):
             scraped_count[0] += 1
-            status.update(f"[bold cyan]({scraped_count[0]}/{len(target_urls)}) Finished Scraping: {url[:60]}...[/bold cyan]")
+            status.update(f"[bold cyan]({scraped_count[0]} scraped) Finished: {url[:60]}...[/bold cyan]")
 
-        scraped_data = scraper.scrape_urls_concurrently(target_urls, timeout=15, status_callback=update_status)
+        target_count = len(target_urls) if urls else max_res
+        scraped_data = scraper.scrape_urls_adaptive(search_results, target_count=target_count, timeout=15, status_callback=update_status)
             
     # Print scraping summary
     table = Table(title="📊 Scraping Completion Status", border_style="cyan")
@@ -433,6 +436,57 @@ def scheduler_menu():
         console.print("\n[bold yellow]⚠ Automation scheduler halted by user. Returning to main menu.[/bold yellow]")
         time.sleep(2)
 
+def sitemap_scanner_menu():
+    """Menu to scan a domain's XML sitemap for public URLs and optionally scrape them."""
+    console.clear()
+    show_banner()
+    console.print("[bold green]=== XML Sitemap Scanner & Crawl ===[/bold green]\n")
+    
+    domain = Prompt.ask("🌐 Enter domain name to scan (e.g., netflixtechblog.com)")
+    domain = domain.strip().lower()
+    
+    # Strip protocol prefix if user typed it
+    if domain.startswith("http://"):
+        domain = domain[7:]
+    elif domain.startswith("https://"):
+        domain = domain[8:]
+    if "/" in domain:
+        domain = domain.split("/")[0]
+        
+    config = config_manager.load_config()
+    max_urls = config.get("default_max_results", 5)
+    
+    with console.status(f"[bold cyan]Scanning sitemaps on '{domain}'...[/bold cyan]"):
+        urls = scraper.scan_sitemap_urls(domain, max_urls=max_urls * 3)
+        
+    if not urls:
+        console.print(f"[bold red]❌ No public URLs found in sitemaps for domain: {domain}[/bold red]")
+        Prompt.ask("\nPress Enter to return to main menu")
+        return
+        
+    console.print(f"[green]✔ Discovered {len(urls)} public URLs in sitemaps![/green]\n")
+    
+    table = Table(title=f"🌐 Sitemap URLs on {domain}", border_style="cyan")
+    table.add_column("No.", style="yellow", justify="center")
+    table.add_column("URL Target", style="white")
+    
+    for idx, url in enumerate(urls[:max_urls]):
+        table.add_row(str(idx + 1), url)
+    console.print(table)
+    
+    if len(urls) > max_urls:
+        console.print(f"[dim]... and {len(urls) - max_urls} more URLs found.[/dim]\n")
+        
+    scrape_now = Confirm.ask(f"Would you like to fetch and analyze the top {min(len(urls), max_urls)} URLs now?", default=True)
+    if scrape_now:
+        spec_topic = Prompt.ask("🎯 Describe specific details or topic you are researching from these pages")
+        target_urls = urls[:max_urls]
+        
+        # Invoke core execute_scrape_flow using our sitemap URLs directly!
+        execute_scrape_flow(f"Sitemap: {domain}", spec_topic, target_urls, config)
+        
+    Prompt.ask("\nPress Enter to return to main menu")
+
 def main():
     """Main application loop."""
     while True:
@@ -446,9 +500,10 @@ def main():
             
             table.add_row("1.", "🔍 Run Scraper & Notifier (Single deep-dive run)")
             table.add_row("2.", "⏱️ Start Automation (Recurring scheduled scrapes)")
-            table.add_row("3.", "⚙️ Configure API Keys & Settings")
-            table.add_row("4.", "📁 Browse Saved Reports History")
-            table.add_row("5.", "❌ Exit")
+            table.add_row("3.", "🌐 Scan XML Sitemap (Domain URL extraction)")
+            table.add_row("4.", "⚙️ Configure API Keys & Settings")
+            table.add_row("5.", "📁 Browse Saved Reports History")
+            table.add_row("6.", "❌ Exit")
             
             menu_panel = Panel(
                 table,
@@ -458,17 +513,19 @@ def main():
             )
             console.print(menu_panel)
             
-            choice = Prompt.ask("Choose an option (1-5)", choices=["1", "2", "3", "4", "5"], default="1")
+            choice = Prompt.ask("Choose an option (1-6)", choices=["1", "2", "3", "4", "5", "6"], default="1")
             
             if choice == "1":
                 single_scrape_menu()
             elif choice == "2":
                 scheduler_menu()
             elif choice == "3":
-                configure_settings_menu()
+                sitemap_scanner_menu()
             elif choice == "4":
-                browse_reports_menu()
+                configure_settings_menu()
             elif choice == "5":
+                browse_reports_menu()
+            elif choice == "6":
                 console.print("\n[bold green]Thank you for using Automated Web Scraper & Notifier. Goodbye![/bold green]\n")
                 break
         except KeyboardInterrupt:

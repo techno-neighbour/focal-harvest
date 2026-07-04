@@ -12,6 +12,9 @@ import utils
 import hashlib
 import datetime
 import json
+import threading
+
+wayback_cache_lock = threading.Lock()
 
 # List of common User-Agents to avoid scraping detection
 USER_AGENTS = [
@@ -99,7 +102,7 @@ def search_web(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     if tavily_key:
         return search_tavily(query, tavily_key, max_results)
     else:
-        return search_duckduckgo(query, max_results)
+        return search_aggregated(query, max_results)
 
 def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     """
@@ -198,6 +201,119 @@ def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]:
         # In case of any error, fail gracefully and return empty list
         return []
 
+def _search_google_mobile(query: str, max_results: int = 5) -> List[Dict[str, str]]:
+    """
+    Searches Google using the old-school JS-free mobile layout.
+    """
+    encoded_query = urllib.parse.quote_plus(query)
+    url = f"https://google.com/search?q={encoded_query}&num={max_results}&gbv=1"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    }
+    
+    try:
+        response = utils.safe_request("get", url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return []
+            
+        soup = BeautifulSoup(response.text, "html.parser")
+        results = []
+        
+        for result in soup.find_all("div", class_="ZINbbc xpd O0w1lb rl7tS"):
+            link_element = result.find("a", href=True)
+            if not link_element:
+                continue
+                
+            raw_url = link_element["href"]
+            if "/url?q=" in raw_url:
+                clean_url = raw_url.split("/url?q=")[1].split("&")[0]
+                clean_url = urllib.parse.unquote(clean_url)
+                
+                # Fetch text snippet
+                snippet_div = result.find("div", class_="BNeawe s3v9rd AP7Wnd")
+                description = snippet_div.get_text() if snippet_div else ""
+                
+                # Fetch title
+                title_div = result.find("div", class_="BNeawe vvjwfb rl7tS dd1u6b title") or result.find("div", class_="BNeawe vvjwfb rl7tS dd1u6b")
+                title = title_div.get_text() if title_div else "No Title"
+                
+                results.append({
+                    "title": title,
+                    "url": clean_url,
+                    "snippet": description
+                })
+                if len(results) >= max_results:
+                    break
+        return results
+    except Exception:
+        return []
+
+def search_aggregated(query: str, max_results: int = 5) -> List[Dict[str, str]]:
+    """
+    Performs concurrent aggregated search using both Google Mobile and DuckDuckGo.
+    """
+    google_res = _search_google_mobile(query, max_results * 2)
+    ddg_res = search_duckduckgo(query, max_results * 2)
+    
+    seen_urls = set()
+    merged = []
+    
+    for r in (google_res + ddg_res):
+        norm_url = r["url"].rstrip("/")
+        if norm_url not in seen_urls:
+            seen_urls.add(norm_url)
+            merged.append(r)
+            if len(merged) >= max_results:
+                break
+    return merged
+
+def _parse_sitemap_xml(xml_content: str, max_urls: int = 10) -> List[str]:
+    """
+    Parses standard sitemap XML structure to extract post URLs.
+    """
+    try:
+        import warnings
+        from bs4 import XMLParsedAsHTMLWarning
+        warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+    except ImportError:
+        pass
+
+    try:
+        soup = BeautifulSoup(xml_content, "html.parser")
+        loc_tags = soup.find_all("loc")
+        urls = []
+        for tag in loc_tags:
+            url = tag.get_text().strip()
+            if url:
+                urls.append(url)
+            if len(urls) >= max_urls:
+                break
+        return urls
+    except Exception:
+        return []
+
+def scan_sitemap_urls(domain: str, max_urls: int = 10) -> List[str]:
+    """
+    Scans a domain for common XML sitemaps to retrieve public URLs.
+    """
+    sitemap_paths = ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-posts.xml"]
+    headers = get_headers()
+    
+    for path in sitemap_paths:
+        url = f"https://{domain}{path}"
+        try:
+            response = utils.safe_request("get", url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                urls = _parse_sitemap_xml(response.text, max_urls)
+                if urls:
+                    return urls
+        except Exception:
+            continue
+    return []
+
 CACHE_DIR = "reports/cache"
 
 def get_cache_filepath(url: str) -> str:
@@ -244,7 +360,75 @@ def save_cached_url(url: str, scraped_dict: Dict[str, Any]) -> None:
     except Exception:
         pass
 
+def _fetch_wayback_cache(url: str, timeout: int = 15) -> Optional[str]:
+    """
+    Retrieves the pre-rendered HTML page copy from the Internet Archive Wayback Machine.
+    """
+    cache_url = f"https://web.archive.org/web/2/{url}"
+    
+    with wayback_cache_lock:
+        try:
+            # Stagger sequential requests to behave politely to Archive.org API
+            time.sleep(random.uniform(1.5, 3.0))
+            
+            # Request directly and let requests follow the 302/307 redirect
+            response = requests.get(cache_url, headers=get_headers(), timeout=timeout, allow_redirects=True)
+            if response.status_code == 200 and "web.archive.org/web/" in response.url:
+                return response.text
+        except Exception:
+            pass
+    return None
+
+def _clean_wayback_html(html_content: str) -> str:
+    """
+    Strips the Wayback Machine toolbar and overlay elements.
+    """
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        # Decompose elements with IDs containing 'wm-' (Wayback Machine interface)
+        for el in soup.find_all(id=lambda val: val and "wm-" in val):
+            el.decompose()
+        for script in soup.find_all("script"):
+            src = script.get("src", "")
+            if "archive.org" in src:
+                script.decompose()
+        return str(soup)
+    except Exception:
+        return html_content
+
 def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
+    """
+    Scrapes the target URL, checking local cache first.
+    """
+    try:
+        import config_manager
+        config = config_manager.load_config()
+        cache_enabled = config.get("cache_enabled", True)
+        cache_expire_hours = config.get("cache_expiration_hours", 24)
+    except Exception:
+        cache_enabled = True
+        cache_expire_hours = 24
+
+def _is_wayback_boilerplate(text: str) -> bool:
+    """
+    Checks if the text content consists primarily of Wayback Machine's own donation/toolbar text.
+    """
+    text_lower = text.lower()
+    indicators = [
+        "please don't scroll past this",
+        "internet archive",
+        "wayback machine",
+        "archive.org",
+        "donation",
+        "chip in"
+    ]
+    if len(text) < 800:
+        match_count = sum(1 for ind in indicators if ind in text_lower)
+        if match_count >= 2:
+            return True
+    return False
+
+def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[str, Any]:
     """
     Scrapes the target URL, checking local cache first.
     """
@@ -260,21 +444,55 @@ def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
     if cache_enabled:
         cached = load_cached_url(url, cache_expire_hours)
         if cached:
-            cached["cached"] = True
-            return cached
+            # Only use cache if it has real text and is not Wayback donation boilerplate
+            raw_text = cached.get("raw_text")
+            if raw_text is None or (raw_text.strip() and not _is_wayback_boilerplate(raw_text)):
+                cached["cached"] = True
+                return cached
+
+    # Check if this is a known SPA platform that returns empty shells without JS
+    is_spa = any(domain in url for domain in ["facebook.com", "instagram.com", "linkedin.com", "twitter.com", "x.com"])
+    
+    if is_spa:
+        cached_html = _fetch_wayback_cache(url, timeout)
+        if cached_html:
+            result = _parse_html_to_scraped_dict(url, cached_html)
+            result["cached"] = False
+            
+            # Apply fallback snippet if content is empty or boilerplate
+            if result.get("success"):
+                raw_txt = result.get("raw_text", "")
+                if (not raw_txt.strip() or _is_wayback_boilerplate(raw_txt)) and fallback_snippet:
+                    result["raw_text"] = fallback_snippet
+                    result["paragraphs"] = [fallback_snippet]
+                    if result.get("title") == "[no-title]" or not result.get("title"):
+                        result["title"] = "Scraped Snippet"
+            
+            if cache_enabled and result.get("success"):
+                save_cached_url(url, result)
+            return result
 
     result = _perform_scrape_url(url, timeout)
     result["cached"] = False
+
+    # Apply fallback snippet if content is empty or boilerplate
+    if result.get("success"):
+        raw_txt = result.get("raw_text", "")
+        if (not raw_txt.strip() or _is_wayback_boilerplate(raw_txt)) and fallback_snippet:
+            result["raw_text"] = fallback_snippet
+            result["paragraphs"] = [fallback_snippet]
+            if result.get("title") == "[no-title]" or not result.get("title"):
+                result["title"] = "Scraped Snippet"
 
     if cache_enabled and result.get("success"):
         save_cached_url(url, result)
 
     return result
 
-def _perform_scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
+def _parse_html_to_scraped_dict(url: str, html_text: str) -> Dict[str, Any]:
     """
-    Scrapes the target URL, extracts title, headings, meta descriptions, 
-    and returns sanitized text content sorted by structural elements.
+    Parses raw HTML text, extracts title, headings, meta descriptions,
+    and returns a sanitized scraped dictionary.
     """
     result = {
         "url": url,
@@ -288,40 +506,21 @@ def _perform_scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
     }
     
     try:
-        response = utils.safe_request("get", url, headers=get_headers(), timeout=timeout, allow_redirects=True)
-        if response.status_code != 200:
-            result["error"] = f"HTTP status {response.status_code}"
-            return result
-            
-        content_type = response.headers.get('content-type', '').lower()
-        if 'text/html' not in content_type:
-            result["error"] = f"Unsupported content type: {content_type}"
-            return result
-            
-        # Check if response body is empty or whitespace
-        if not response.text or not response.text.strip():
-            result["error"] = "Empty response body"
-            return result
-
-        # Parse full document with BeautifulSoup first to get meta description and prepare fallback
-        full_soup = BeautifulSoup(response.text, 'html.parser')
+        full_soup = BeautifulSoup(html_text, 'html.parser')
         
-        # Get Meta Description
         meta_desc = full_soup.find('meta', attrs={'name': 'description'}) or full_soup.find('meta', attrs={'property': 'og:description'})
         if meta_desc and meta_desc.get('content'):
             result["meta_description"] = meta_desc['content'].strip()
             
-        # Get Title from full_soup by default
         if full_soup.title:
             result["title"] = full_soup.title.get_text().strip()
 
-        # Try using python-readability to extract clean article content
         readability_text = ""
         readability_headings = []
         readability_paragraphs = []
         
         try:
-            doc = Document(response.text)
+            doc = Document(html_text)
             readability_title = doc.title().strip()
             if readability_title:
                 result["title"] = readability_title
@@ -329,7 +528,6 @@ def _perform_scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
             summary_html = doc.summary()
             container = BeautifulSoup(summary_html, 'html.parser')
             
-            # Extract headings and paragraphs from readability output
             extracted_headings = []
             extracted_paragraphs = []
             all_text_blocks = []
@@ -360,23 +558,17 @@ def _perform_scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
             readability_headings = extracted_headings
             readability_paragraphs = extracted_paragraphs
         except Exception:
-            # Fall back to BeautifulSoup if readability fails or raises ParserError
             pass
 
-        # Check if readability succeeded in finding a reasonable amount of structured content
-        # For non-article pages (directories, tables, indices like Hacker News/GitHub),
-        # readability is highly prone to extracting 0 or very few characters.
         if len(readability_text.strip()) > 200:
             result["headings"] = readability_headings
             result["paragraphs"] = readability_paragraphs
             result["raw_text"] = readability_text
         else:
-            # Fall back to standard BeautifulSoup cleaning of full document
-            soup_copy = BeautifulSoup(response.text, 'html.parser')
+            soup_copy = BeautifulSoup(html_text, 'html.parser')
             for element in soup_copy(["script", "style", "nav", "footer", "header", "aside", "form", "iframe", "noscript", "svg"]):
                 element.decompose()
                 
-            # Try to find primary container
             container = None
             for selector in ['article', 'main', '[role="main"]', '.post', '.article', '.entry', '.content', '#content', '#main']:
                 found = soup_copy.select(selector)
@@ -426,10 +618,57 @@ def _perform_scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
         result["error"] = str(e)
         return result
 
-async def _scrape_urls_concurrently(urls: List[str], timeout: int = 15, status_callback: Optional[Callable[[str], None]] = None) -> List[Dict[str, Any]]:
+def _perform_scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
+    """
+    Scrapes the target URL, extracts title, headings, meta descriptions, 
+    and returns sanitized text content sorted by structural elements.
+    """
+    result = {
+        "url": url,
+        "title": "",
+        "meta_description": "",
+        "raw_text": "",
+        "headings": [],
+        "paragraphs": [],
+        "success": False,
+        "error": None
+    }
+    
+    try:
+        response = utils.safe_request("get", url, headers=get_headers(), timeout=timeout, allow_redirects=True)
+        if response.status_code != 200:
+            result["error"] = f"HTTP status {response.status_code}"
+            return result
+            
+        content_type = response.headers.get('content-type', '').lower()
+        if 'text/html' not in content_type:
+            result["error"] = f"Unsupported content type: {content_type}"
+            return result
+            
+        # Check if response body is empty or whitespace
+        if not response.text or not response.text.strip():
+            result["error"] = "Empty response body"
+            return result
+
+        return _parse_html_to_scraped_dict(url, response.text)
+        
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+
+async def _scrape_urls_concurrently(
+    urls: List[str], 
+    timeout: int = 15, 
+    status_callback: Optional[Callable[[str], None]] = None,
+    url_snippets: Optional[Dict[str, str]] = None
+) -> List[Dict[str, Any]]:
     # Wrap the synchronous call to scrape_url in a separate thread using asyncio.to_thread
     async def scrape_and_notify(url):
-        res = await asyncio.to_thread(scrape_url, url, timeout)
+        fallback_snippet = url_snippets.get(url, "") if url_snippets else ""
+        if fallback_snippet:
+            res = await asyncio.to_thread(scrape_url, url, timeout, fallback_snippet)
+        else:
+            res = await asyncio.to_thread(scrape_url, url, timeout)
         if status_callback:
             status_callback(res["url"])
         return res
@@ -438,11 +677,77 @@ async def _scrape_urls_concurrently(urls: List[str], timeout: int = 15, status_c
     results = await asyncio.gather(*tasks)
     return results
 
-def scrape_urls_concurrently(urls: List[str], timeout: int = 15, status_callback: Optional[Callable[[str], None]] = None) -> List[Dict[str, Any]]:
+def scrape_urls_concurrently(
+    urls: List[str], 
+    timeout: int = 15, 
+    status_callback: Optional[Callable[[str], None]] = None,
+    url_snippets: Optional[Dict[str, str]] = None
+) -> List[Dict[str, Any]]:
     """
     Scrape multiple URLs concurrently using asyncio and requests in a thread pool.
     """
-    return asyncio.run(_scrape_urls_concurrently(urls, timeout, status_callback))
+    return asyncio.run(_scrape_urls_concurrently(urls, timeout, status_callback, url_snippets))
+
+def scrape_urls_adaptive(
+    candidate_results: List[Dict[str, Any]],
+    target_count: int,
+    timeout: int = 15,
+    status_callback: Optional[Callable[[str], None]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Scrapes URLs from candidate_results concurrently in batches.
+    Replenishes failed/empty results until target_count high-quality scrapes are reached,
+    or candidates are exhausted.
+    """
+    all_scraped = []
+    pool = list(candidate_results)
+    scraped_urls = set()
+    
+    url_snippets = {r["url"]: r.get("snippet", "") for r in pool}
+    
+    def get_quality_score(res: Dict[str, Any]) -> int:
+        if not res.get("success"):
+            return 0
+        raw_txt = res.get("raw_text", "")
+        if not raw_txt.strip() or _is_wayback_boilerplate(raw_txt):
+            return 1
+        if res.get("title") == "Scraped Snippet":
+            return 2
+        return 3
+
+    while pool:
+        # Count how many quality 3 or 2 results we have
+        good_count = sum(1 for r in all_scraped if get_quality_score(r) >= 2)
+        if good_count >= target_count:
+            break
+            
+        # Determine batch size to fetch next
+        needed = target_count - good_count
+        batch = []
+        while len(batch) < needed and pool:
+            candidate = pool.pop(0)
+            url = candidate["url"]
+            if url not in scraped_urls:
+                scraped_urls.add(url)
+                batch.append(url)
+                
+        if not batch:
+            break
+            
+        # Scrape concurrently
+        batch_results = scrape_urls_concurrently(
+            batch, 
+            timeout=timeout, 
+            status_callback=status_callback, 
+            url_snippets=url_snippets
+        )
+        all_scraped.extend(batch_results)
+        
+    # Sort all scraped results by quality score descending
+    all_scraped.sort(key=get_quality_score, reverse=True)
+    
+    # Return the top target_count results
+    return all_scraped[:target_count]
 
 # Simple test block
 if __name__ == "__main__":
