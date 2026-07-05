@@ -272,7 +272,7 @@ def search_aggregated(query: str, max_results: int = 5) -> List[Dict[str, str]]:
 
 def _parse_sitemap_xml(xml_content: str, max_urls: int = 10) -> List[str]:
     """
-    Parses standard sitemap XML structure to extract post URLs.
+    Parses standard sitemap XML structure to extract page/sitemap URLs.
     """
     try:
         import warnings
@@ -283,12 +283,25 @@ def _parse_sitemap_xml(xml_content: str, max_urls: int = 10) -> List[str]:
 
     try:
         soup = BeautifulSoup(xml_content, "html.parser")
+        is_index = soup.find("sitemapindex") is not None or soup.find("sitemap") is not None
+        
         loc_tags = soup.find_all("loc")
         urls = []
         for tag in loc_tags:
             url = tag.get_text().strip()
-            if url:
+            if not url:
+                continue
+                
+            if is_index:
                 urls.append(url)
+            else:
+                # Exclude tag, category, author archive pages (non-articles)
+                url_lower = url.lower()
+                exclude_patterns = ["/tagged/", "/category/", "/author/", "/@", "/search/", "/tags/", "/categories/"]
+                if any(pat in url_lower for pat in exclude_patterns):
+                    continue
+                urls.append(url)
+                
             if len(urls) >= max_urls:
                 break
         return urls
@@ -297,21 +310,68 @@ def _parse_sitemap_xml(xml_content: str, max_urls: int = 10) -> List[str]:
 
 def scan_sitemap_urls(domain: str, max_urls: int = 10) -> List[str]:
     """
-    Scans a domain for common XML sitemaps to retrieve public URLs.
+    Scans a domain for XML sitemaps by reading its robots.txt first,
+    falling back to common paths if none are declared.
     """
-    sitemap_paths = ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-posts.xml"]
+    sitemap_urls = []
     headers = get_headers()
     
-    for path in sitemap_paths:
-        url = f"https://{domain}{path}"
+    # Tier 1: Try reading robots.txt dynamically
+    robots_url = f"https://{domain}/robots.txt"
+    try:
+        response = utils.safe_request("get", robots_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            for line in response.text.splitlines():
+                line = line.strip()
+                if line.lower().startswith("sitemap:"):
+                    parts = line.split(":", 1)
+                    if len(parts) > 1:
+                        sitemaps_found = parts[1].strip()
+                        if sitemaps_found and sitemaps_found not in sitemap_urls:
+                            sitemap_urls.append(sitemaps_found)
+    except Exception:
+        pass
+        
+    # Tier 2: Fall back to guessing common paths if no sitemaps were found in robots.txt
+    if not sitemap_urls:
+        sitemap_paths = ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-posts.xml", "/sitemap/sitemap.xml"]
+        for path in sitemap_paths:
+            sitemap_urls.append(f"https://{domain}{path}")
+            
+    # Scan the resolved sitemap URLs (resolving indexes dynamically)
+    for url in sitemap_urls:
         try:
             response = utils.safe_request("get", url, headers=headers, timeout=10)
             if response.status_code == 200:
+                is_index = "sitemapindex" in response.text or "<sitemap>" in response.text
                 urls = _parse_sitemap_xml(response.text, max_urls)
-                if urls:
+                
+                if not is_index and urls:
                     return urls
+                elif is_index and urls:
+                    # It's a sitemap index! Locate and prioritize post/article sitemaps
+                    prioritized = []
+                    others = []
+                    for sub_url in urls:
+                        sub_lower = sub_url.lower()
+                        if any(k in sub_lower for k in ["post", "article", "story", "page", "sitemap-1", "sitemap_1"]):
+                            prioritized.append(sub_url)
+                        else:
+                            others.append(sub_url)
+                            
+                    # Query sub-sitemaps in order of priority
+                    for sub_url in (prioritized + others):
+                        try:
+                            sub_resp = utils.safe_request("get", sub_url, headers=headers, timeout=10)
+                            if sub_resp.status_code == 200:
+                                sub_pages = _parse_sitemap_xml(sub_resp.text, max_urls)
+                                if sub_pages:
+                                    return sub_pages
+                        except Exception:
+                            continue
         except Exception:
             continue
+            
     return []
 
 CACHE_DIR = "reports/cache"

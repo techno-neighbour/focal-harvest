@@ -260,6 +260,75 @@ class TestScraper(unittest.TestCase):
         self.assertEqual(len(urls), 1)
         self.assertEqual(urls[0], "http://example.com/item")
 
+    @patch('utils.safe_request')
+    def test_scan_sitemap_urls_via_robots_txt(self, mock_request):
+        mock_robots_resp = MagicMock()
+        mock_robots_resp.status_code = 200
+        mock_robots_resp.text = "User-agent: *\nDisallow: /private\nSitemap: https://example.com/custom_sitemap.xml"
+        
+        mock_sitemap_resp = MagicMock()
+        mock_sitemap_resp.status_code = 200
+        mock_sitemap_resp.text = "<url><loc>http://example.com/item-via-robots</loc></url>"
+        
+        mock_request.side_effect = [mock_robots_resp, mock_sitemap_resp]
+        
+        urls = scraper.scan_sitemap_urls("example.com")
+        self.assertEqual(len(urls), 1)
+        self.assertEqual(urls[0], "http://example.com/item-via-robots")
+
+    def test_parse_sitemap_xml_filters_categories(self):
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+           <url>
+              <loc>http://www.example.com/posts/my-story</loc>
+           </url>
+           <url>
+              <loc>http://www.example.com/tagged/simian-army</loc>
+           </url>
+           <url>
+              <loc>http://www.example.com/@username</loc>
+           </url>
+           <url>
+              <loc>http://www.example.com/posts/another-story</loc>
+           </url>
+        </urlset>
+        """
+        urls = scraper._parse_sitemap_xml(xml_content, max_urls=5)
+        self.assertEqual(len(urls), 2)
+        self.assertEqual(urls[0], "http://www.example.com/posts/my-story")
+        self.assertEqual(urls[1], "http://www.example.com/posts/another-story")
+
+    @patch('utils.safe_request')
+    def test_scan_sitemap_index_resolution(self, mock_request):
+        mock_robots = MagicMock()
+        mock_robots.status_code = 404
+        
+        mock_index = MagicMock()
+        mock_index.status_code = 200
+        mock_index.text = """<?xml version="1.0" encoding="UTF-8"?>
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+           <sitemap>
+              <loc>http://example.com/sitemap-tags.xml</loc>
+           </sitemap>
+           <sitemap>
+              <loc>http://example.com/sitemap-posts.xml</loc>
+           </sitemap>
+        </sitemapindex>
+        """
+        
+        mock_posts_sitemap = MagicMock()
+        mock_posts_sitemap.status_code = 200
+        mock_posts_sitemap.text = "<url><loc>http://example.com/story-1</loc></url>"
+        
+        mock_request.side_effect = [mock_robots, mock_index, mock_posts_sitemap]
+        
+        urls = scraper.scan_sitemap_urls("example.com")
+        self.assertEqual(len(urls), 1)
+        self.assertEqual(urls[0], "http://example.com/story-1")
+        
+        call_args = mock_request.call_args_list
+        self.assertEqual(call_args[2][0][1], "http://example.com/sitemap-posts.xml")
+
     @patch('requests.get')
     def test_fetch_wayback_cache_success(self, mock_get):
         mock_resp = MagicMock()
