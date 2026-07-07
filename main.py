@@ -10,7 +10,8 @@ import sys
 import time
 import datetime
 import glob
-from typing import List, Dict, Any
+import hashlib
+from typing import List, Dict, Any, Tuple, Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -26,8 +27,10 @@ import scraper
 import analyzer
 import notifier
 import config_manager
+import utils
 
 console = Console()
+logger = utils.setup_logging()
 
 BANNER_TEXT = """
     ███████╗ ██████╗  ██████╗  █████╗  ██╗        ██╗  ██╗ █████╗ ██████╗ ██╗   ██╗███████╗███████╗████████╗
@@ -214,8 +217,29 @@ def browse_reports_menu():
             console.print("[red]Please enter a valid number or 'back'.[/red]")
             time.sleep(1)
 
-def execute_scrape_flow(query: str, spec_topic: str, urls: List[str], config: Dict[str, Any]) -> str:
+def calculate_scraped_hash(scraped_data: List[Dict[str, Any]]) -> str:
+    """
+    Generates a unique MD5 hash representing the current scraped data content and URLs.
+    """
+    # Filter only successful scrapes and sort by URL to ensure stable order
+    valid_data = sorted([d for d in scraped_data if d.get("success")], key=lambda x: x["url"])
+    fingerprint_parts = []
+    for d in valid_data:
+        fingerprint_parts.append(d["url"])
+        fingerprint_parts.append(d.get("raw_text", ""))
+    
+    fingerprint_str = "||".join(fingerprint_parts)
+    return hashlib.md5(fingerprint_str.encode("utf-8")).hexdigest()
+
+def execute_scrape_flow(
+    query: str, 
+    spec_topic: str, 
+    urls: List[str], 
+    config: Dict[str, Any], 
+    previous_hash: Optional[str] = None
+) -> Tuple[Optional[str], str]:
     """Core logic to search, scrape, analyze, and notify."""
+    logger.info("Initializing scrape flow execution for query: '%s', focus: '%s'", query, spec_topic)
     search_engine = config.get("search_engine", "duckduckgo")
     gemini_key = config.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
     
@@ -224,11 +248,13 @@ def execute_scrape_flow(query: str, spec_topic: str, urls: List[str], config: Di
         if not gemini_key:
             console.print("[yellow]⚠ Warning: AI Search Grounding requires a Gemini API Key. Falling back to local crawler...[/yellow]")
         else:
+            logger.info("Triggering Path A: AI Search Grounding search...")
             with console.status("[bold cyan]Google AI Search Grounding (Live)...[/bold cyan]"):
                 res = analyzer.generate_gemini_grounding_search(query, spec_topic, gemini_key)
                 
             if res["success"]:
                 console.print(f"[green]✔ AI Grounding search complete![/green]")
+                logger.info("AI Search Grounding successful. Caching response report.")
                 if res["queries"]:
                     console.print(f"[dim]Search queries executed: {', '.join(res['queries'])}[/dim]")
                 
@@ -245,8 +271,9 @@ def execute_scrape_flow(query: str, spec_topic: str, urls: List[str], config: Di
                 if dispatch_res["telegram"]:
                     console.print("[green]✔ Telegram notification dispatched successfully![/green]")
                     
-                return res["report"]
+                return res["report"], ""
             else:
+                logger.error("AI Search Grounding failed: %s. Falling back to normal crawler.", res.get('error'))
                 console.print(f"[red]❌ AI Search Grounding failed: {res['error']}. Falling back to normal crawler...[/red]")
 
     # ─── PATH B: NORMAL SCRAping and CRAWLING ─────────────────────────────────
@@ -267,16 +294,19 @@ def execute_scrape_flow(query: str, spec_topic: str, urls: List[str], config: Di
                 search_results = scraper.search_duckduckgo(query, max_results=candidate_pool_size)
             
         if not search_results:
+            logger.warning("No search results returned from search query.")
             console.print("[bold red]❌ No search results found. Check connection or try another topic.[/bold red]")
-            return ""
+            return "", ""
             
         console.print(f"[green]✔ Found {len(search_results)} candidate search results via {engine_name}.[/green]")
         target_urls = [r["url"] for r in search_results]
     else:
+        logger.info("Explicit URL list passed to execution flow: %s", str(urls))
         target_urls = urls
         search_results = [{"title": f"Manual URL {i+1}", "url": url, "snippet": ""} for i, url in enumerate(urls)]
         
     # Phase 2: Scrape URLs
+    logger.info("Proceeding to Phase 2: Crawler scraping on %d target URLs.", len(target_urls))
     with console.status("[bold cyan]Fetching and parsing target websites...[/bold cyan]") as status:
         scraped_count = [0]
 
@@ -308,14 +338,25 @@ def execute_scrape_flow(query: str, spec_topic: str, urls: List[str], config: Di
     console.print(table)
     
     if not any(d["success"] for d in scraped_data):
+        logger.warning("Crawler was unable to scrape text from any of the candidate URLs.")
         console.print("[bold red]❌ Failed to retrieve content from any of the target sites.[/bold red]")
-        return ""
+        return "", ""
+        
+    # Calculate state hash to check for incremental changes
+    current_hash = calculate_scraped_hash(scraped_data)
+    logger.info("Calculated current scraped content hash: %s", current_hash)
+    
+    if previous_hash is not None and current_hash == previous_hash:
+        logger.info("Incremental check: Current scraped content matches previous run hash (%s). Skipping LLM generation.", current_hash)
+        return None, current_hash
         
     # Phase 3: Synthesis & Analysis
+    logger.info("Proceeding to Phase 3: LLM Synthesis and Analysis.")
     with console.status("[bold cyan]Analyzing web content and synthesizing report...[/bold cyan]"):
         report = analyzer.synthesize_topics(scraped_data, query, spec_topic)
         
     # Phase 4: Dispatch Notifications and save files
+    logger.info("Proceeding to Phase 4: Notification dispatch and report saving.")
     with console.status("[bold cyan]Saving report and dispatching notification triggers...[/bold cyan]"):
         dispatch_res = notifier.dispatch_notifications(query, spec_topic, report, scraped_data, config)
         
@@ -327,7 +368,7 @@ def execute_scrape_flow(query: str, spec_topic: str, urls: List[str], config: Di
     if dispatch_res["telegram"]:
         console.print("[green]✔ Telegram notification dispatched successfully![/green]")
         
-    return report
+    return report, current_hash
 
 def single_scrape_menu():
     """Handles the user inputs to trigger a single scrape and deep dive run."""
@@ -407,24 +448,38 @@ def scheduler_menu():
         console.print("[red]Invalid integer. Defaulting to 15 minutes.[/red]")
         interval_sec = 15 * 60
         
+    logger.info("Scheduler configured: query='%s', focus='%s', interval=%.2f minutes", query, spec_topic, interval_sec / 60)
     console.print(f"\n[bold yellow]📅 Starting automation loop...[/bold yellow]")
     console.print(f"Monitor Topic: [cyan]'{query}'[/cyan]")
     console.print(f"Interval: [cyan]{interval_sec / 60:.1f} minutes[/cyan]")
     console.print("[bold red]Press Ctrl+C to terminate the automation loop at any time.[/bold red]\n")
     
     run_count = 0
+    last_run_hashes = {}
+    query_key = f"{query}||{spec_topic}"
     try:
         while True:
             run_count += 1
             timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+            logger.info("Scheduler: Launching automated run #%d for key '%s'", run_count, query_key)
             console.print(f"[bold cyan]🔄 [{timestamp}] Launching automated scrape run #{run_count}...[/bold cyan]")
             
             try:
-                execute_scrape_flow(query, spec_topic, [], config)
-                console.print(f"[green]✔ Run #{run_count} finished successfully at {time.strftime('%H:%M:%S')}.[/green]")
+                prev_hash = last_run_hashes.get(query_key)
+                report, new_hash = execute_scrape_flow(query, spec_topic, [], config, previous_hash=prev_hash)
+                last_run_hashes[query_key] = new_hash
+                
+                if report is None:
+                    logger.info("Scheduler: Run #%d complete. No new content changes detected. Webhooks bypassed.", run_count)
+                    console.print(f"[yellow]✔ Run #{run_count} complete. No new changes detected. Skipping report generation & notifications.[/yellow]")
+                else:
+                    logger.info("Scheduler: Run #%d complete. New changes detected. Webhooks dispatched.", run_count)
+                    console.print(f"[green]✔ Run #{run_count} finished successfully at {time.strftime('%H:%M:%S')}.[/green]")
             except Exception as e:
+                logger.error("Scheduler exception during run #%d: %s", run_count, str(e))
                 console.print(f"[red]❌ Error occurred during run #{run_count}: {str(e)}[/red]")
                 
+            logger.info("Scheduler entering idle sleep state for %.2f minutes...", interval_sec / 60)
             console.print(f"[dim]Waiting {interval_sec / 60:.1f} minutes before next run. Press Ctrl+C to exit.[/dim]\n")
             
             # Sleep in small blocks to allow responsive keyboard interrupts

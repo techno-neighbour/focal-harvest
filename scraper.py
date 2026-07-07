@@ -15,6 +15,7 @@ import json
 import threading
 
 wayback_cache_lock = threading.Lock()
+logger = utils.setup_logging()
 
 # List of common User-Agents to avoid scraping detection
 USER_AGENTS = [
@@ -59,6 +60,7 @@ def search_tavily(query: str, api_key: str, max_results: int = 5) -> List[Dict[s
     Searches using the Tavily Search API. Returns a structured list of results
     containing 'title', 'url', and 'snippet'.
     """
+    logger.info("Executing Tavily API search for query: '%s' (max_results=%d)", query, max_results)
     url = "https://api.tavily.com/search"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -81,10 +83,13 @@ def search_tavily(query: str, api_key: str, max_results: int = 5) -> List[Dict[s
                     "url": item.get("url", ""),
                     "snippet": item.get("content", "")
                 })
+            logger.info("Tavily search returned %d candidate results.", len(results))
             return results
         else:
+            logger.error("Tavily search returned non-200 status code: %d", response.status_code)
             return []
     except Exception as e:
+        logger.error("Exception during Tavily search: %s", str(e))
         return []
 
 def search_web(query: str, max_results: int = 5) -> List[Dict[str, str]]:
@@ -100,8 +105,10 @@ def search_web(query: str, max_results: int = 5) -> List[Dict[str, str]]:
         
     tavily_key = config.get("tavily_api_key") or os.environ.get("TAVILY_API_KEY")
     if tavily_key:
+        logger.info("Preferred search provider Tavily detected.")
         return search_tavily(query, tavily_key, max_results)
     else:
+        logger.info("No Tavily API key found. Falling back to multi-engine Aggregated Crawler...")
         return search_aggregated(query, max_results)
 
 def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]:
@@ -109,6 +116,7 @@ def search_duckduckgo(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     Searches DuckDuckGo HTML interface and returns list of results.
     Each result contains 'title', 'url', and 'snippet'.
     """
+    logger.info("Executing DuckDuckGo HTML search for query: '%s' (max_results=%d)", query, max_results)
     encoded_query = urllib.parse.quote_plus(query)
     # Using the standard HTML-only version of DuckDuckGo which is lightweight and reliable
     url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
@@ -255,8 +263,10 @@ def search_aggregated(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     """
     Performs concurrent aggregated search using both Google Mobile and DuckDuckGo.
     """
+    logger.info("Executing aggregated search (Google Mobile + DDG) for query: '%s' (max_results=%d)", query, max_results)
     google_res = _search_google_mobile(query, max_results * 2)
     ddg_res = search_duckduckgo(query, max_results * 2)
+    logger.info("Retrieved candidate pool: Google Mobile (%d), DuckDuckGo (%d)", len(google_res), len(ddg_res))
     
     seen_urls = set()
     merged = []
@@ -268,6 +278,7 @@ def search_aggregated(query: str, max_results: int = 5) -> List[Dict[str, str]]:
             merged.append(r)
             if len(merged) >= max_results:
                 break
+    logger.info("Merged and deduplicated aggregated results to %d candidates.", len(merged))
     return merged
 
 def _parse_sitemap_xml(xml_content: str, max_urls: int = 10) -> List[str]:
@@ -313,6 +324,7 @@ def scan_sitemap_urls(domain: str, max_urls: int = 10) -> List[str]:
     Scans a domain for XML sitemaps by reading its robots.txt first,
     falling back to common paths if none are declared.
     """
+    logger.info("Initializing sitemap scan for domain: %s", domain)
     sitemap_urls = []
     headers = get_headers()
     
@@ -321,6 +333,7 @@ def scan_sitemap_urls(domain: str, max_urls: int = 10) -> List[str]:
     try:
         response = utils.safe_request("get", robots_url, headers=headers, timeout=10)
         if response.status_code == 200:
+            logger.info("Successfully fetched robots.txt for domain: %s", domain)
             for line in response.text.splitlines():
                 line = line.strip()
                 if line.lower().startswith("sitemap:"):
@@ -329,11 +342,14 @@ def scan_sitemap_urls(domain: str, max_urls: int = 10) -> List[str]:
                         sitemaps_found = parts[1].strip()
                         if sitemaps_found and sitemaps_found not in sitemap_urls:
                             sitemap_urls.append(sitemaps_found)
-    except Exception:
-        pass
+            if sitemap_urls:
+                logger.info("Found %d sitemap URL(s) listed in robots.txt", len(sitemap_urls))
+    except Exception as e:
+        logger.error("Exception scanning robots.txt on %s: %s", domain, str(e))
         
     # Tier 2: Fall back to guessing common paths if no sitemaps were found in robots.txt
     if not sitemap_urls:
+        logger.info("No sitemaps declared in robots.txt. Falling back to guessing standard paths.")
         sitemap_paths = ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-posts.xml", "/sitemap/sitemap.xml"]
         for path in sitemap_paths:
             sitemap_urls.append(f"https://{domain}{path}")
@@ -341,15 +357,17 @@ def scan_sitemap_urls(domain: str, max_urls: int = 10) -> List[str]:
     # Scan the resolved sitemap URLs (resolving indexes dynamically)
     for url in sitemap_urls:
         try:
+            logger.info("Attempting to parse sitemap XML: %s", url)
             response = utils.safe_request("get", url, headers=headers, timeout=10)
             if response.status_code == 200:
                 is_index = "sitemapindex" in response.text or "<sitemap>" in response.text
                 urls = _parse_sitemap_xml(response.text, max_urls)
                 
                 if not is_index and urls:
+                    logger.info("Successfully resolved %d pages from sitemap: %s", len(urls), url)
                     return urls
                 elif is_index and urls:
-                    # It's a sitemap index! Locate and prioritize post/article sitemaps
+                    logger.info("Detected Sitemap Index with %d sub-sitemaps at %s. Resolving recursively...", len(urls), url)
                     prioritized = []
                     others = []
                     for sub_url in urls:
@@ -362,16 +380,21 @@ def scan_sitemap_urls(domain: str, max_urls: int = 10) -> List[str]:
                     # Query sub-sitemaps in order of priority
                     for sub_url in (prioritized + others):
                         try:
+                            logger.info("Querying nested sub-sitemap: %s", sub_url)
                             sub_resp = utils.safe_request("get", sub_url, headers=headers, timeout=10)
                             if sub_resp.status_code == 200:
                                 sub_pages = _parse_sitemap_xml(sub_resp.text, max_urls)
                                 if sub_pages:
+                                    logger.info("Resolved %d pages from sub-sitemap: %s", len(sub_pages), sub_url)
                                     return sub_pages
-                        except Exception:
+                        except Exception as sub_err:
+                            logger.error("Exception crawling nested sitemap %s: %s", sub_url, str(sub_err))
                             continue
-        except Exception:
+        except Exception as err:
+            logger.error("Exception crawling sitemap %s: %s", url, str(err))
             continue
             
+    logger.warning("No public sitemap URLs could be resolved for domain: %s", domain)
     return []
 
 CACHE_DIR = "reports/cache"
@@ -425,6 +448,7 @@ def _fetch_wayback_cache(url: str, timeout: int = 15) -> Optional[str]:
     Retrieves the pre-rendered HTML page copy from the Internet Archive Wayback Machine.
     """
     cache_url = f"https://web.archive.org/web/2/{url}"
+    logger.info("Querying Wayback Machine direct redirect cache for URL: %s", url)
     
     with wayback_cache_lock:
         try:
@@ -434,9 +458,12 @@ def _fetch_wayback_cache(url: str, timeout: int = 15) -> Optional[str]:
             # Request directly and let requests follow the 302/307 redirect
             response = requests.get(cache_url, headers=get_headers(), timeout=timeout, allow_redirects=True)
             if response.status_code == 200 and "web.archive.org/web/" in response.url:
+                logger.info("Wayback Machine cache hit found for URL: %s", url)
                 return response.text
-        except Exception:
-            pass
+            else:
+                logger.warning("Wayback Machine returned status %d or redirected elsewhere for URL: %s", response.status_code if response else 0, url)
+        except Exception as e:
+            logger.error("Exception fetching Wayback Machine cache for %s: %s", url, str(e))
     return None
 
 def _clean_wayback_html(html_content: str) -> str:
@@ -455,19 +482,6 @@ def _clean_wayback_html(html_content: str) -> str:
         return str(soup)
     except Exception:
         return html_content
-
-def scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
-    """
-    Scrapes the target URL, checking local cache first.
-    """
-    try:
-        import config_manager
-        config = config_manager.load_config()
-        cache_enabled = config.get("cache_enabled", True)
-        cache_expire_hours = config.get("cache_expiration_hours", 24)
-    except Exception:
-        cache_enabled = True
-        cache_expire_hours = 24
 
 def _is_wayback_boilerplate(text: str) -> bool:
     """
@@ -492,6 +506,7 @@ def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[
     """
     Scrapes the target URL, checking local cache first.
     """
+    logger.info("Initializing scrape request for URL: %s", url)
     try:
         import config_manager
         config = config_manager.load_config()
@@ -504,9 +519,9 @@ def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[
     if cache_enabled:
         cached = load_cached_url(url, cache_expire_hours)
         if cached:
-            # Only use cache if it has real text and is not Wayback donation boilerplate
             raw_text = cached.get("raw_text")
             if raw_text is None or (raw_text.strip() and not _is_wayback_boilerplate(raw_text)):
+                logger.info("Cache hit for URL: %s (loading cached content)", url)
                 cached["cached"] = True
                 return cached
 
@@ -514,6 +529,7 @@ def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[
     is_spa = any(domain in url for domain in ["facebook.com", "instagram.com", "linkedin.com", "twitter.com", "x.com"])
     
     if is_spa:
+        logger.info("Target URL: %s identified as SPA. Querying Wayback Archive...", url)
         cached_html = _fetch_wayback_cache(url, timeout)
         if cached_html:
             result = _parse_html_to_scraped_dict(url, cached_html)
@@ -523,6 +539,7 @@ def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[
             if result.get("success"):
                 raw_txt = result.get("raw_text", "")
                 if (not raw_txt.strip() or _is_wayback_boilerplate(raw_txt)) and fallback_snippet:
+                    logger.warning("Scrape returned empty/boilerplate for URL: %s. Applying fallback search snippet.", url)
                     result["raw_text"] = fallback_snippet
                     result["paragraphs"] = [fallback_snippet]
                     if result.get("title") == "[no-title]" or not result.get("title"):
@@ -539,6 +556,7 @@ def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[
     if result.get("success"):
         raw_txt = result.get("raw_text", "")
         if (not raw_txt.strip() or _is_wayback_boilerplate(raw_txt)) and fallback_snippet:
+            logger.warning("Scrape returned empty/boilerplate for URL: %s. Applying fallback search snippet.", url)
             result["raw_text"] = fallback_snippet
             result["paragraphs"] = [fallback_snippet]
             if result.get("title") == "[no-title]" or not result.get("title"):
@@ -547,6 +565,7 @@ def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[
     if cache_enabled and result.get("success"):
         save_cached_url(url, result)
 
+    logger.info("Scrape completed successfully for URL: %s (length: %d chars)", url, len(result.get("raw_text", "")))
     return result
 
 def _parse_html_to_scraped_dict(url: str, html_text: str) -> Dict[str, Any]:
@@ -759,6 +778,7 @@ def scrape_urls_adaptive(
     Replenishes failed/empty results until target_count high-quality scrapes are reached,
     or candidates are exhausted.
     """
+    logger.info("Initializing adaptive queue scraping for %d candidate(s). Target count: %d", len(candidate_results), target_count)
     all_scraped = []
     pool = list(candidate_results)
     scraped_urls = set()
@@ -783,6 +803,7 @@ def scrape_urls_adaptive(
             
         # Determine batch size to fetch next
         needed = target_count - good_count
+        logger.info("Adaptive replenishment loop state: %d/%d quality resources scraped. Need %d more.", good_count, target_count, needed)
         batch = []
         while len(batch) < needed and pool:
             candidate = pool.pop(0)
@@ -795,6 +816,7 @@ def scrape_urls_adaptive(
             break
             
         # Scrape concurrently
+        logger.info("Scraping next batch of %d URLs concurrently.", len(batch))
         batch_results = scrape_urls_concurrently(
             batch, 
             timeout=timeout, 
@@ -807,7 +829,9 @@ def scrape_urls_adaptive(
     all_scraped.sort(key=get_quality_score, reverse=True)
     
     # Return the top target_count results
-    return all_scraped[:target_count]
+    final_results = all_scraped[:target_count]
+    logger.info("Adaptive queue finished. Returning top %d results out of %d total scraped.", len(final_results), len(all_scraped))
+    return final_results
 
 # Simple test block
 if __name__ == "__main__":

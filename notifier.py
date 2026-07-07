@@ -4,6 +4,7 @@ import datetime
 import requests
 from typing import List, Dict, Any
 import utils
+logger = utils.setup_logging()
 from rich.console import Console
 from rich.markdown import Markdown
 
@@ -23,6 +24,8 @@ def save_report_to_files(query: str, spec_topic: str, markdown_content: str, scr
     
     md_filename = f"reports/report_{safe_query}_{timestamp}.md"
     json_filename = f"reports/raw_data_{safe_query}_{timestamp}.json"
+    
+    logger.info("Saving generated report to files: '%s' and '%s'", md_filename, json_filename)
     
     # Save Markdown report
     with open(md_filename, "w", encoding="utf-8") as f:
@@ -54,9 +57,9 @@ def send_discord_webhook(webhook_url: str, query: str, spec_topic: str, markdown
     if not webhook_url:
         return False
         
+    logger.info("Attempting to dispatch Discord Webhook alert for query: '%s'", query)
     # Build clean snippet from executive summary or markdown
     summary_snippet = ""
-    # Extract text block under Executive Summary
     lines = markdown_content.splitlines()
     exec_idx = -1
     for i, line in enumerate(lines):
@@ -96,8 +99,14 @@ def send_discord_webhook(webhook_url: str, query: str, spec_topic: str, markdown
     
     try:
         res = utils.safe_request("post", webhook_url, json=payload, timeout=10)
-        return res.status_code in (200, 204)
+        success = res.status_code in (200, 204)
+        if success:
+            logger.info("Successfully dispatched Discord webhook alert.")
+        else:
+            logger.error("Discord webhook delivery failed with HTTP status code: %d", res.status_code)
+        return success
     except Exception as e:
+        logger.error("Exception sending Discord webhook notification: %s", str(e))
         console.print(f"[bold red]Failed to send Discord webhook: {str(e)}[/bold red]")
         return False
 
@@ -106,6 +115,7 @@ def send_telegram_notification(token: str, chat_id: str, query: str, spec_topic:
     if not token or not chat_id:
         return False
         
+    logger.info("Attempting to dispatch Telegram sendMessage payload for query: '%s'", query)
     message = f"**🌐 Web Scraper Deep Dive Report**\n\n"
     message += f"**Query:** {query}\n"
     message += f"**Focus Area:** {spec_topic}\n\n"
@@ -123,8 +133,14 @@ def send_telegram_notification(token: str, chat_id: str, query: str, spec_topic:
     
     try:
         res = utils.safe_request("post", url, json=payload, timeout=10)
-        return res.status_code == 200
+        success = res.status_code == 200
+        if success:
+            logger.info("Successfully dispatched Telegram notification alert.")
+        else:
+            logger.error("Telegram notification delivery failed with HTTP status code: %d", res.status_code)
+        return success
     except Exception as e:
+        logger.error("Exception sending Telegram notification: %s", str(e))
         console.print(f"[bold red]Failed to send Telegram notification: {str(e)}[/bold red]")
         return False
 
@@ -139,6 +155,7 @@ def dispatch_notifications(
     Saves report files and dispatches notifications via console, discord, and telegram 
     based on config options.
     """
+    logger.info("Starting report notification dispatch router...")
     saved_paths = save_report_to_files(query, spec_topic, markdown_content, scraped_data)
     
     results = {
@@ -162,4 +179,5 @@ def dispatch_notifications(
     if tg_token and tg_chat_id:
         results["telegram"] = send_telegram_notification(tg_token, tg_chat_id, query, spec_topic, markdown_content)
         
+    logger.info("Notification dispatch router complete. Output paths: %s", json.dumps(saved_paths))
     return results

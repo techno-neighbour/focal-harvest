@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Set
 from collections import Counter
 import math
 import utils
+logger = utils.setup_logging()
 
 # A basic list of stop words to filter out during keyword analysis
 STOP_WORDS = {
@@ -335,6 +336,7 @@ def synthesize_topics(scraped_data: List[Dict[str, Any]], query: str, spec_topic
     Orchestrates the synthesis step. Automatically routes to the selected AI provider based on 
     config priority (Gemini -> OpenAI -> Claude) if key is present, falling back to local synthesis.
     """
+    logger.info("Starting AI synthesis for query: '%s' (Focus: '%s'). Loaded %d source(s) to analyze.", query, spec_topic, len(scraped_data))
     # Import config to check settings dynamically
     try:
         import config_manager
@@ -350,21 +352,27 @@ def synthesize_topics(scraped_data: List[Dict[str, Any]], query: str, spec_topic
     
     # Provider Routing Logic
     if provider == "gemini" and gemini_key:
+        logger.info("Routing synthesis to Gemini API (preferred provider)...")
         return generate_gemini_summary(scraped_data, query, spec_topic, gemini_key)
     elif provider == "openai" and openai_key:
+        logger.info("Routing synthesis to OpenAI API (preferred provider)...")
         return generate_openai_summary(scraped_data, query, spec_topic, openai_key)
     elif provider == "anthropic" and claude_key:
+        logger.info("Routing synthesis to Anthropic Claude API (preferred provider)...")
         return generate_claude_summary(scraped_data, query, spec_topic, claude_key)
         
     # Automatic fallback if preferred key is missing but others exist
     if gemini_key:
+        logger.warning("Preferred provider %s API key missing. Falling back to Gemini API...", provider)
         return generate_gemini_summary(scraped_data, query, spec_topic, gemini_key)
     elif openai_key:
+        logger.warning("Preferred provider %s API key missing. Falling back to OpenAI API...", provider)
         return generate_openai_summary(scraped_data, query, spec_topic, openai_key)
     elif claude_key:
+        logger.warning("Preferred provider %s API key missing. Falling back to Anthropic Claude API...", provider)
         return generate_claude_summary(scraped_data, query, spec_topic, claude_key)
         
-    # Standard rule-based fallback
+    logger.warning("No third-party LLM API keys found. Falling back to local keyword synthesis...")
     return generate_local_summary(scraped_data, query, spec_topic)
 
 def generate_gemini_grounding_search(query: str, spec_topic: str, api_key: str) -> Dict[str, Any]:
