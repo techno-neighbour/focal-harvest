@@ -232,6 +232,53 @@ class TestScraper(unittest.TestCase):
         # Verify _perform_scrape_url was NOT called
         mock_perform.assert_not_called()
 
+    def test_parse_ssr_next_js_success(self):
+        html_content = """
+        <html>
+          <head><title>My Next.js Article</title></head>
+          <body>
+            <script id="__NEXT_DATA__" type="application/json">
+            {
+              "props": {
+                "pageProps": {
+                  "post": {
+                    "title": "My Next.js Article",
+                    "content": "This is a very long paragraph that satisfies the minimum character count of 80 characters inside the recursive JSON parser.",
+                    "details": {
+                       "author": "John Doe",
+                       "body": "Another long paragraph that satisfies the length limits of eighty characters to verify recursive extraction of page body content."
+                    }
+                  }
+                }
+              }
+            }
+            </script>
+          </body>
+        </html>
+        """
+        res = scraper._parse_html_to_scraped_dict("http://next-example.com", html_content)
+        self.assertTrue(res["success"])
+        self.assertEqual(res["title"], "My Next.js Article")
+        self.assertEqual(len(res["paragraphs"]), 2)
+        self.assertIn("This is a very long paragraph", res["paragraphs"][0])
+        self.assertIn("Another long paragraph", res["paragraphs"][1])
+
+    def test_parse_bot_blocked_failure(self):
+        html_content = """
+        <html>
+          <head><title>Radware Bot Manager Captcha</title></head>
+          <body>
+            <h2>We apologize for the inconvenience...</h2>
+            <p>To ensure we keep this website safe, please can you confirm you are a human by ticking the box below.</p>
+          </body>
+        </html>
+        """
+        res = scraper._parse_html_to_scraped_dict("http://blocked-site.com", html_content)
+        self.assertFalse(res["success"])
+        self.assertIn("Blocked by firewall", res["error"])
+        self.assertEqual(len(res["paragraphs"]), 0)
+        self.assertEqual(res["raw_text"], "")
+
     def test_parse_sitemap_xml(self):
         xml_content = """<?xml version="1.0" encoding="UTF-8"?>
         <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">

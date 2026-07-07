@@ -52,7 +52,7 @@ def show_banner():
     banner_panel = Panel(
         Align.center(gradient_text),
         border_style="bright_blue",
-        subtitle="V1.0.0 • Local extractive summarizer & AI Engine ready"
+        subtitle="V1.1.0 • Local extractive summarizer, SSR Extractors, & AI Engine ready"
     )
     console.print(banner_panel)
 

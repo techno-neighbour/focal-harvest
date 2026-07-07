@@ -568,6 +568,78 @@ def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[
     logger.info("Scrape completed successfully for URL: %s (length: %d chars)", url, len(result.get("raw_text", "")))
     return result
 
+BOT_BLOCK_SIGNATURES = [
+    "radware bot manager",
+    "please confirm you are a human",
+    "confirm you are not a bot",
+    "powered and protected by",          # Imperva / Incapsula footer
+    "attention required | cloudflare",
+    "checking your browser before accessing",
+    "enable javascript and cookies to continue",
+    "incapsula",
+    "distil networks",
+    "bot detection",
+    "unusual traffic from your computer network"
+]
+
+def _is_bot_blocked(title: str, text: str) -> Optional[str]:
+    """
+    Checks if the page content matches known anti-bot firewall signatures.
+    Returns the matching signature or None.
+    """
+    combined = (title + " " + text).lower()
+    for sig in BOT_BLOCK_SIGNATURES:
+        if sig in combined:
+            return sig
+    return None
+
+def _extract_longest_strings(data: Any) -> List[str]:
+    """
+    Recursively traverses a JSON structure to extract all text strings longer 
+    than 80 characters, filtering out CSS classes, layout elements, and URLs.
+    """
+    strings = []
+    if isinstance(data, str):
+        val = data.strip()
+        # Filter out URLs, JSON brackets, and short UI text
+        if len(val) > 80 and not val.startswith("http") and not val.startswith("/") and "{" not in val:
+            strings.append(val)
+    elif isinstance(data, dict):
+        for v in data.values():
+            strings.extend(_extract_longest_strings(v))
+    elif isinstance(data, list):
+        for item in data:
+            strings.extend(_extract_longest_strings(item))
+    return strings
+
+def _try_extract_ssr_data(soup: BeautifulSoup) -> Optional[List[str]]:
+    """
+    Looks for Next.js or Nuxt SSR data scripts, parses the JSON payload, 
+    and returns a list of main text paragraphs.
+    """
+    # 1. Next.js check
+    next_tag = soup.find("script", id="__NEXT_DATA__")
+    if next_tag:
+        try:
+            data = json.loads(next_tag.get_text())
+            page_props = data.get("props", {}).get("pageProps", {})
+            if page_props:
+                return _extract_longest_strings(page_props)
+        except Exception:
+            pass
+
+    # 2. Nuxt.js check (Nuxt 3 uses __NUXT_DATA__ type="application/json")
+    nuxt_tag = soup.find("script", id="__NUXT_DATA__")
+    if nuxt_tag:
+        try:
+            data = json.loads(nuxt_tag.get_text())
+            if data:
+                return _extract_longest_strings(data)
+        except Exception:
+            pass
+            
+    return None
+
 def _parse_html_to_scraped_dict(url: str, html_text: str) -> Dict[str, Any]:
     """
     Parses raw HTML text, extracts title, headings, meta descriptions,
@@ -587,6 +659,16 @@ def _parse_html_to_scraped_dict(url: str, html_text: str) -> Dict[str, Any]:
     try:
         full_soup = BeautifulSoup(html_text, 'html.parser')
         
+        # Try extracting Next.js / Nuxt SSR data first
+        ssr_paragraphs = _try_extract_ssr_data(full_soup)
+        if ssr_paragraphs:
+            result["title"] = full_soup.title.get_text().strip() if full_soup.title else "SSR Scraped Page"
+            result["paragraphs"] = ssr_paragraphs
+            result["raw_text"] = "\n\n".join(ssr_paragraphs)
+            result["success"] = True
+            logger.info("Successfully extracted %d paragraphs from SSR JSON block for URL: %s", len(ssr_paragraphs), url)
+            return result
+            
         meta_desc = full_soup.find('meta', attrs={'name': 'description'}) or full_soup.find('meta', attrs={'property': 'og:description'})
         if meta_desc and meta_desc.get('content'):
             result["meta_description"] = meta_desc['content'].strip()
@@ -689,6 +771,16 @@ def _parse_html_to_scraped_dict(url: str, html_text: str) -> Dict[str, Any]:
             result["headings"] = extracted_headings
             result["paragraphs"] = extracted_paragraphs
             result["raw_text"] = raw_text
+
+        # Check if the page is actually a bot blocker page (e.g. Radware, Cloudflare, Imperva)
+        block_signature = _is_bot_blocked(result["title"], result["raw_text"])
+        if block_signature:
+            result["success"] = False
+            result["error"] = f"Blocked by firewall (matched: {block_signature})"
+            result["raw_text"] = ""
+            result["paragraphs"] = []
+            logger.warning("Bot blocker detected on URL %s: %s", url, block_signature)
+            return result
 
         result["success"] = True
         return result
