@@ -279,6 +279,49 @@ class TestScraper(unittest.TestCase):
         self.assertEqual(len(res["paragraphs"]), 0)
         self.assertEqual(res["raw_text"], "")
 
+    def test_get_youtube_video_id(self):
+        urls = [
+            ("https://www.youtube.com/watch?v=S_6DNS_z4DA", "S_6DNS_z4DA"),
+            ("https://youtu.be/S_6DNS_z4DA", "S_6DNS_z4DA"),
+            ("https://www.youtube.com/embed/S_6DNS_z4DA", "S_6DNS_z4DA"),
+            ("https://www.youtube.com/shorts/S_6DNS_z4DA", "S_6DNS_z4DA"),
+        ]
+        for url, expected in urls:
+            self.assertEqual(scraper._get_youtube_video_id(url), expected)
+
+    @patch('scraper.YouTubeTranscriptApi.fetch')
+    def test_scrape_youtube_transcript_success(self, mock_fetch):
+        from collections import namedtuple
+        Entry = namedtuple('Entry', ['text', 'start', 'duration'])
+        mock_fetch.return_value = [
+            Entry("Hello world", 0.0, 2.0),
+            Entry("this is a test transcript", 2.0, 3.0)
+        ]
+        
+        # Bypass config checks for cache_enabled defaults
+        with patch('config_manager.load_config', return_value={"cache_enabled": False}):
+            res = scraper.scrape_url("https://www.youtube.com/watch?v=S_6DNS_z4DA")
+            self.assertTrue(res["success"])
+            self.assertEqual(res["title"], "YouTube Video Transcript")
+            self.assertEqual(res["raw_text"], "Hello world this is a test transcript")
+
+    def test_parse_youtube_skeleton_failure(self):
+        html_content = """
+        <html>
+          <head><title>Rick Astley - Never Gonna Give You Up - YouTube</title></head>
+          <body>
+            <p>How YouTube works</p>
+            <p>Test new features</p>
+            <p>© 2026 Google LLC</p>
+          </body>
+        </html>
+        """
+        res = scraper._parse_html_to_scraped_dict("https://www.youtube.com/watch?v=dQw4w9WgXcQ", html_content)
+        self.assertFalse(res["success"])
+        self.assertEqual(res["error"], "YouTube Transcript Unavailable (PoToken required)")
+        self.assertEqual(len(res["paragraphs"]), 0)
+        self.assertEqual(res["raw_text"], "")
+
     def test_parse_sitemap_xml(self):
         xml_content = """<?xml version="1.0" encoding="UTF-8"?>
         <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">

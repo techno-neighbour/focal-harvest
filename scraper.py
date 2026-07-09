@@ -13,6 +13,9 @@ import hashlib
 import datetime
 import json
 import threading
+import re
+import html
+from youtube_transcript_api import YouTubeTranscriptApi
 
 wayback_cache_lock = threading.Lock()
 logger = utils.setup_logging()
@@ -525,8 +528,32 @@ def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[
                 cached["cached"] = True
                 return cached
 
+    # Check if YouTube URL and fetch transcript directly
+    video_id = _get_youtube_video_id(url)
+    if video_id:
+        logger.info("YouTube link detected. Attempting direct transcript extraction for ID: %s", video_id)
+        transcript = _fetch_youtube_transcript(video_id, timeout=timeout)
+        if transcript:
+            result = {
+                "url": url,
+                "title": "YouTube Video Transcript",
+                "meta_description": "",
+                "raw_text": transcript,
+                "headings": [],
+                "paragraphs": [transcript],
+                "success": True,
+                "error": None,
+                "cached": False
+            }
+            logger.info("Successfully extracted YouTube transcript.")
+            if cache_enabled and result.get("success"):
+                save_cached_url(url, result)
+            return result
+        else:
+            logger.warning("YouTube transcript extraction failed. Falling back to Wayback Machine redirection.")
+
     # Check if this is a known SPA platform that returns empty shells without JS
-    is_spa = any(domain in url for domain in ["facebook.com", "instagram.com", "linkedin.com", "twitter.com", "x.com"])
+    is_spa = any(domain in url for domain in ["facebook.com", "instagram.com", "linkedin.com", "twitter.com", "x.com", "youtube.com", "youtu.be"])
     
     if is_spa:
         logger.info("Target URL: %s identified as SPA. Querying Wayback Archive...", url)
@@ -592,6 +619,25 @@ def _is_bot_blocked(title: str, text: str) -> Optional[str]:
         if sig in combined:
             return sig
     return None
+
+def _get_youtube_video_id(url: str) -> Optional[str]:
+    """Extracts the 11-character YouTube video ID from a URL."""
+    match = re.search(r'(?:v=|\/|embed\/|shorts\/)([0-9A-Za-z_-]{11})', url)
+    return match.group(1) if match else None
+
+def _fetch_youtube_transcript(video_id: str, timeout: int = 10) -> Optional[str]:
+    """
+    Fetches the video transcript using the youtube_transcript_api package.
+    Returns the full transcript text or None.
+    """
+    try:
+        # Get the transcript
+        transcript_list = YouTubeTranscriptApi().fetch(video_id)
+        # Combine all parts into a clean space-separated text block
+        return " ".join([entry.text for entry in transcript_list])
+    except Exception as e:
+        logger.error("Exception fetching YouTube transcript via API: %s", str(e))
+        return None
 
 def _extract_longest_strings(data: Any) -> List[str]:
     """
@@ -781,6 +827,16 @@ def _parse_html_to_scraped_dict(url: str, html_text: str) -> Dict[str, Any]:
             result["paragraphs"] = []
             logger.warning("Bot blocker detected on URL %s: %s", url, block_signature)
             return result
+
+        # Check if the page is YouTube layout skeleton without transcript
+        if "youtube.com" in url or "youtu.be" in url:
+            if not result.get("raw_text") or len(result["raw_text"]) < 300 or "How YouTube works" in result["raw_text"]:
+                result["success"] = False
+                result["error"] = "YouTube Transcript Unavailable (PoToken required)"
+                result["raw_text"] = ""
+                result["paragraphs"] = []
+                logger.warning("YouTube scrape failed to extract transcript for URL: %s", url)
+                return result
 
         result["success"] = True
         return result
