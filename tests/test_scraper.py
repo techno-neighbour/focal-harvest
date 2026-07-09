@@ -419,8 +419,9 @@ class TestScraper(unittest.TestCase):
         call_args = mock_request.call_args_list
         self.assertEqual(call_args[2][0][1], "http://example.com/sitemap-posts.xml")
 
+    @patch('time.sleep')
     @patch('requests.get')
-    def test_fetch_wayback_cache_success(self, mock_get):
+    def test_fetch_wayback_cache_success(self, mock_get, mock_sleep):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.url = "http://web.archive.org/web/123/http://facebook.com/post"
@@ -472,6 +473,69 @@ class TestScraper(unittest.TestCase):
         self.assertIn("http://b.com", urls_returned)
         self.assertIn("http://c.com", urls_returned)
         self.assertNotIn("http://a.com", urls_returned)
+
+    @patch('utils.safe_request')
+    def test_search_duckduckgo_lite_fallback_non_200(self, mock_request):
+        # Mocks first request returning 500 (HTML DDG)
+        mock_resp_500 = MagicMock()
+        mock_resp_500.status_code = 500
+        
+        # Mocks second request returning 200 (Lite DDG) with results table
+        mock_resp_200 = MagicMock()
+        mock_resp_200.status_code = 200
+        mock_resp_200.text = """
+        <table>
+          <tr>
+            <td><a class="result-link" href="https://duckduckgo.com/l/?uddg=http%3A%2F%2Ftest.com&rut=456">Test Lite Title</a></td>
+          </tr>
+          <tr>
+            <td class="result-snippet">Test Lite Snippet Description.</td>
+          </tr>
+        </table>
+        """
+        mock_request.side_effect = [mock_resp_500, mock_resp_200]
+        
+        results = scraper.search_duckduckgo("query", max_results=2)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Test Lite Title")
+        self.assertEqual(results[0]["url"], "http://test.com")
+        self.assertEqual(results[0]["snippet"], "Test Lite Snippet Description.")
+
+    @patch('time.sleep')
+    @patch('requests.get')
+    def test_fetch_wayback_cache_failures(self, mock_get, mock_sleep):
+        # 1. Non-200 HTTP code
+        mock_resp_404 = MagicMock()
+        mock_resp_404.status_code = 404
+        mock_get.return_value = mock_resp_404
+        self.assertIsNone(scraper._fetch_wayback_cache("http://site.com"))
+
+        # 2. Connection Exception raised
+        mock_get.side_effect = Exception("Wayback is down")
+        self.assertIsNone(scraper._fetch_wayback_cache("http://site.com"))
+
+    @patch('utils.safe_request')
+    def test_scan_sitemap_urls_robots_txt_failures(self, mock_request):
+        # Mock robots.txt failure and guessing sitemap failure
+        mock_resp_404 = MagicMock()
+        mock_resp_404.status_code = 404
+        mock_request.return_value = mock_resp_404
+        
+        urls = scraper.scan_sitemap_urls("site.com", max_urls=5)
+        self.assertEqual(len(urls), 0)
+
+    def test_clean_wayback_html(self):
+        dirty_html = """
+        <html>
+          <!-- BEGIN WAYBACK TOOLBAR INSERT -->
+          <div id="wm-ipp-base">Toolbar banner here</div>
+          <!-- END WAYBACK TOOLBAR INSERT -->
+          <body>Real Content</body>
+        </html>
+        """
+        cleaned = scraper._clean_wayback_html(dirty_html)
+        self.assertNotIn("wm-ipp-base", cleaned)
+        self.assertIn("Real Content", cleaned)
 
 if __name__ == '__main__':
     unittest.main()

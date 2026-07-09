@@ -102,5 +102,52 @@ class TestNotifier(unittest.TestCase):
         mock_discord.assert_called_once_with("http://discord.webhook", query, spec, md_content, "reports/report.md")
         mock_tg.assert_called_once_with("token", "chat_id", query, spec, md_content)
 
+    @patch('utils.safe_request')
+    def test_send_discord_webhook_boundaries_and_failures(self, mock_request):
+        # 1. Null/empty validation
+        self.assertFalse(notifier.send_discord_webhook("", "query", "spec", "content", "reports/report.md"))
+        
+        # 2. HTTP failure (status 400)
+        mock_resp_400 = MagicMock()
+        mock_resp_400.status_code = 400
+        mock_request.return_value = mock_resp_400
+        self.assertFalse(notifier.send_discord_webhook("http://webhook", "query", "spec", "content", "reports/report.md"))
+
+        # 3. Connection Exception
+        mock_request.side_effect = Exception("Connection timed out")
+        self.assertFalse(notifier.send_discord_webhook("http://webhook", "query", "spec", "content", "reports/report.md"))
+
+        # 4. Summary formatting fallback (no '## Executive Summary')
+        mock_request.side_effect = None
+        mock_resp_200 = MagicMock()
+        mock_resp_200.status_code = 200
+        mock_request.return_value = mock_resp_200
+        
+        long_content = "Word " * 200
+        self.assertTrue(notifier.send_discord_webhook("http://webhook", "query", "spec", long_content, "reports/report.md"))
+        payload = mock_request.call_args[1]["json"]
+        self.assertTrue(payload["embeds"][0]["description"].endswith("..."))
+
+    @patch('utils.safe_request')
+    def test_send_telegram_notification_boundaries_and_failures(self, mock_request):
+        # 1. Null/empty validation
+        self.assertFalse(notifier.send_telegram_notification("", "chat_id", "query", "spec", "content"))
+        self.assertFalse(notifier.send_telegram_notification("token", "", "query", "spec", "content"))
+
+        # 2. HTTP failure (status 401)
+        mock_resp_401 = MagicMock()
+        mock_resp_401.status_code = 401
+        mock_request.return_value = mock_resp_401
+        self.assertFalse(notifier.send_telegram_notification("token", "chat_id", "query", "spec", "content"))
+
+        # 3. Connection Exception
+        mock_request.side_effect = Exception("API Server unreachable")
+        self.assertFalse(notifier.send_telegram_notification("token", "chat_id", "query", "spec", "content"))
+
+    @patch('notifier.console.print')
+    def test_print_to_console(self, mock_print):
+        notifier.print_to_console("Markdown text")
+        self.assertEqual(mock_print.call_count, 3)
+
 if __name__ == '__main__':
     unittest.main()

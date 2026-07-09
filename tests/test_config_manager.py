@@ -40,11 +40,15 @@ class TestConfigManager(unittest.TestCase):
         # Set mock environment variables
         with patch.dict(os.environ, {
             "GEMINI_API_KEY": "env-gemini-key",
-            "DISCORD_WEBHOOK_URL": "http://discord.hook"
+            "DISCORD_WEBHOOK_URL": "http://discord.hook",
+            "TELEGRAM_BOT_TOKEN": "env-tg-token",
+            "TELEGRAM_CHAT_ID": "env-tg-chat-id"
         }):
             config = config_manager.load_config()
             self.assertEqual(config["gemini_api_key"], "env-gemini-key")
             self.assertEqual(config["discord_webhook"], "http://discord.hook")
+            self.assertEqual(config["telegram_token"], "env-tg-token")
+            self.assertEqual(config["telegram_chat_id"], "env-tg-chat-id")
             self.assertEqual(config["preferred_provider"], "gemini")
 
     @patch('builtins.open', new_callable=mock_open)
@@ -71,6 +75,42 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(len(saved_call["saved_searches"]), 1)
         self.assertEqual(saved_call["saved_searches"][0]["query"], "robots")
         self.assertEqual(saved_call["saved_searches"][0]["spec_topic"], "languages in robotics")
+
+    @patch('os.path.exists')
+    @patch('builtins.open', side_effect=Exception("Permission denied"))
+    def test_load_config_corrupt(self, mock_file, mock_exists):
+        mock_exists.return_value = True
+        config = config_manager.load_config()
+        # Should gracefully fall back to default configuration
+        self.assertEqual(config["preferred_provider"], "local")
+        self.assertEqual(config["default_max_results"], 5)
+
+    @patch('builtins.open', side_effect=Exception("Read-only system"))
+    def test_save_config_failure(self, mock_file):
+        config_data = {"preferred_provider": "local"}
+        success = config_manager.save_config(config_data)
+        self.assertFalse(success)
+
+    @patch('os.path.exists')
+    def test_load_config_other_env_overlays(self, mock_exists):
+        mock_exists.return_value = False
+        
+        # Test OpenAI key overlay
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "openai-env-key"}):
+            config = config_manager.load_config()
+            self.assertEqual(config["openai_api_key"], "openai-env-key")
+            self.assertEqual(config["preferred_provider"], "openai")
+
+        # Test Anthropic key overlay
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "anthropic-env-key"}):
+            config = config_manager.load_config()
+            self.assertEqual(config["anthropic_api_key"], "anthropic-env-key")
+            self.assertEqual(config["preferred_provider"], "anthropic")
+
+        # Test Tavily key overlay
+        with patch.dict(os.environ, {"TAVILY_API_KEY": "tavily-env-key"}):
+            config = config_manager.load_config()
+            self.assertEqual(config["tavily_api_key"], "tavily-env-key")
 
 if __name__ == '__main__':
     unittest.main()
