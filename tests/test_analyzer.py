@@ -153,6 +153,31 @@ class TestAnalyzer(unittest.TestCase):
         self.assertIn("Anthropic Claude API call failed", res)
         self.assertIn("Rule-based Local Summary", res)
 
+    @patch('config_manager.load_config')
+    @patch('analyzer.generate_gemini_summary')
+    @patch('analyzer.generate_openai_summary')
+    def test_synthesize_topics_failover_chain(self, mock_openai, mock_gemini, mock_load_config):
+        # Configure both APIs to be available
+        mock_load_config.return_value = {
+            "preferred_provider": "gemini",
+            "gemini_api_key": "gemini-key",
+            "openai_api_key": "openai-key"
+        }
+        
+        # 1. Test failover: Gemini fails, OpenAI succeeds
+        mock_gemini.side_effect = Exception("Gemini Quota Exceeded")
+        mock_openai.return_value = "OpenAI summary result"
+        
+        res = analyzer.synthesize_topics([], "query", "topic")
+        self.assertEqual(res, "OpenAI summary result")
+        
+        # 2. Test complete failover to local if all APIs fail
+        mock_openai.side_effect = Exception("OpenAI Connection Refused")
+        res_fail = analyzer.synthesize_topics([], "query", "topic")
+        self.assertIn("All configured AI providers failed during synthesis", res_fail)
+        self.assertIn("Gemini API failed", res_fail)
+        self.assertIn("OpenAI API failed", res_fail)
+
     @patch('utils.safe_request')
     def test_generate_gemini_grounding_search_success(self, mock_request):
         mock_resp = MagicMock()

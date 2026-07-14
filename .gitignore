@@ -26,3 +26,6 @@ env/
 
 # Task tracker
 todo.md
+
+# User Custom Plugins
+custom_plugins/

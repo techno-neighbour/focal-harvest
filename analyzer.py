@@ -172,7 +172,7 @@ def generate_local_summary(scraped_data: List[Dict[str, Any]], query: str, spec_
         
     return "\n".join(markdown_lines)
 
-def generate_gemini_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str) -> str:
+def generate_gemini_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str, raise_on_error: bool = False) -> str:
     """
     Queries Gemini 1.5 Flash using direct HTTP requests to synthesize the scraped text content
     into a gorgeous, highly structured and professional Markdown Deep Dive report.
@@ -228,10 +228,12 @@ Make sure to:
         else:
             raise Exception(f"HTTP {response.status_code}: {response.text}")
     except Exception as e:
+        if raise_on_error:
+            raise e
         fallback_msg = f"\n\n> [!WARNING]\n> Gemini API call failed: {str(e)}. Falling back to local/rule-based synthesis.\n\n"
         return fallback_msg + generate_local_summary(scraped_data, query, spec_topic)
 
-def generate_openai_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str) -> str:
+def generate_openai_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str, raise_on_error: bool = False) -> str:
     """
     Queries OpenAI's Chat Completion API (using gpt-4o-mini) to synthesize scraped content.
     """
@@ -277,10 +279,12 @@ Ensure you add a 'Sources Scraped' table at the end and dynamically cite sources
         else:
             raise Exception(f"HTTP {response.status_code}: {response.text}")
     except Exception as e:
+        if raise_on_error:
+            raise e
         fallback_msg = f"\n\n> [!WARNING]\n> OpenAI API call failed: {str(e)}. Falling back to local/rule-based synthesis.\n\n"
         return fallback_msg + generate_local_summary(scraped_data, query, spec_topic)
 
-def generate_claude_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str) -> str:
+def generate_claude_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str, raise_on_error: bool = False) -> str:
     """
     Queries Anthropic's Messages API (using claude-3-5-sonnet-20241022) to synthesize scraped content.
     """
@@ -328,13 +332,16 @@ Ensure you add a 'Sources Scraped' table at the end and dynamically cite sources
         else:
             raise Exception(f"HTTP {response.status_code}: {response.text}")
     except Exception as e:
+        if raise_on_error:
+            raise e
         fallback_msg = f"\n\n> [!WARNING]\n> Anthropic Claude API call failed: {str(e)}. Falling back to local/rule-based synthesis.\n\n"
         return fallback_msg + generate_local_summary(scraped_data, query, spec_topic)
 
 def synthesize_topics(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str) -> str:
     """
     Orchestrates the synthesis step. Automatically routes to the selected AI provider based on 
-    config priority (Gemini -> OpenAI -> Claude) if key is present, falling back to local synthesis.
+    config priority (Gemini -> OpenAI -> Claude) if key is present, with multi-provider failover.
+    Falls back to local synthesis only if all configured third-party LLM API calls fail or are missing.
     """
     logger.info("Starting AI synthesis for query: '%s' (Focus: '%s'). Loaded %d source(s) to analyze.", query, spec_topic, len(scraped_data))
     # Import config to check settings dynamically
@@ -344,33 +351,63 @@ def synthesize_topics(scraped_data: List[Dict[str, Any]], query: str, spec_topic
     except Exception:
         config = {}
         
-    provider = config.get("preferred_provider", "local")
+    preferred = config.get("preferred_provider", "local")
     
     gemini_key = config.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
     openai_key = config.get("openai_api_key") or os.environ.get("OPENAI_API_KEY")
     claude_key = config.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")
     
-    # Provider Routing Logic
-    if provider == "gemini" and gemini_key:
-        logger.info("Routing synthesis to Gemini API (preferred provider)...")
-        return generate_gemini_summary(scraped_data, query, spec_topic, gemini_key)
-    elif provider == "openai" and openai_key:
-        logger.info("Routing synthesis to OpenAI API (preferred provider)...")
-        return generate_openai_summary(scraped_data, query, spec_topic, openai_key)
-    elif provider == "anthropic" and claude_key:
-        logger.info("Routing synthesis to Anthropic Claude API (preferred provider)...")
-        return generate_claude_summary(scraped_data, query, spec_topic, claude_key)
+    providers_info = {
+        "gemini": {
+            "fn": generate_gemini_summary,
+            "key": gemini_key,
+            "name": "Gemini API"
+        },
+        "openai": {
+            "fn": generate_openai_summary,
+            "key": openai_key,
+            "name": "OpenAI API"
+        },
+        "anthropic": {
+            "fn": generate_claude_summary,
+            "key": claude_key,
+            "name": "Anthropic Claude API"
+        }
+    }
+    
+    attempt_order = []
+    
+    # 1. Add preferred provider first if it has a key
+    if preferred in providers_info and providers_info[preferred]["key"]:
+        attempt_order.append(preferred)
         
-    # Automatic fallback if preferred key is missing but others exist
-    if gemini_key:
-        logger.warning("Preferred provider %s API key missing. Falling back to Gemini API...", provider)
-        return generate_gemini_summary(scraped_data, query, spec_topic, gemini_key)
-    elif openai_key:
-        logger.warning("Preferred provider %s API key missing. Falling back to OpenAI API...", provider)
-        return generate_openai_summary(scraped_data, query, spec_topic, openai_key)
-    elif claude_key:
-        logger.warning("Preferred provider %s API key missing. Falling back to Anthropic Claude API...", provider)
-        return generate_claude_summary(scraped_data, query, spec_topic, claude_key)
+    # 2. Add remaining providers that have valid keys, following fallback priority: gemini -> openai -> anthropic
+    for p in ["gemini", "openai", "anthropic"]:
+        if p not in attempt_order and providers_info[p]["key"]:
+            attempt_order.append(p)
+            
+    # If preferred provider is 'local', we skip LLM providers and go straight to local summary
+    if preferred == "local":
+        logger.info("Routing synthesis to local keyword summary (preferred)...")
+        return generate_local_summary(scraped_data, query, spec_topic)
+        
+    errors = []
+    for provider_name in attempt_order:
+        info = providers_info[provider_name]
+        logger.info("Routing synthesis to %s...", info["name"])
+        try:
+            return info["fn"](scraped_data, query, spec_topic, info["key"], raise_on_error=True)
+        except Exception as e:
+            err_msg = f"{info['name']} failed: {str(e)}"
+            errors.append(err_msg)
+            logger.warning("%s. Trying next available provider...", err_msg)
+            
+    if errors:
+        fallback_msg = "\n\n> [!WARNING]\n> All configured AI providers failed during synthesis:\n"
+        for err in errors:
+            fallback_msg += f"> * {err}\n"
+        fallback_msg += "> Falling back to local/rule-based synthesis.\n\n"
+        return fallback_msg + generate_local_summary(scraped_data, query, spec_topic)
         
     logger.warning("No third-party LLM API keys found. Falling back to local keyword synthesis...")
     return generate_local_summary(scraped_data, query, spec_topic)
@@ -381,7 +418,7 @@ def generate_gemini_grounding_search(query: str, spec_topic: str, api_key: str) 
     This lets the AI search Google directly, reason on real-time findings, and return a report.
     Returns a dict with "report" and "queries".
     """
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-3.1-flash-lite:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     
     prompt = f"""You are a professional research assistant. Perform a real-time web search and generate a highly detailed, structured Markdown research report.

@@ -16,9 +16,53 @@ import threading
 import re
 import html
 from youtube_transcript_api import YouTubeTranscriptApi
+import importlib.util
+import glob
 
 wayback_cache_lock = threading.Lock()
 logger = utils.setup_logging()
+
+# Registry mapping lowercase domains to custom parse hooks
+PLUGIN_REGISTRY = {}
+
+def load_plugins():
+    """Discovers and dynamically registers custom parsers from std_plugins/ and custom_plugins/."""
+    # 1. Load standard built-in plugins
+    std_dir = os.path.join(os.path.dirname(__file__), "std_plugins")
+    _load_from_dir(std_dir, "standard")
+    
+    # 2. Load custom user-defined plugins
+    custom_dir = os.path.join(os.path.dirname(__file__), "custom_plugins")
+    _load_from_dir(custom_dir, "custom")
+
+def _load_from_dir(directory_path: str, plugin_type: str):
+    if not os.path.exists(directory_path):
+        return
+        
+    plugin_files = glob.glob(os.path.join(directory_path, "*.py"))
+    for file_path in plugin_files:
+        module_name = os.path.basename(file_path)[:-3]
+        if module_name == "__init__":
+            continue
+            
+        try:
+            # Dynamic import setup
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            
+            domains = getattr(module, "SUPPORTED_DOMAINS", [])
+            parse_fn = getattr(module, "parse", None)
+            
+            if parse_fn and domains:
+                for domain in domains:
+                    PLUGIN_REGISTRY[domain.lower()] = parse_fn
+                logger.info("Loaded %s plugin parser: '%s' supporting %s", plugin_type, module_name, str(domains))
+        except Exception as e:
+            logger.error("Failed to load %s plugin from %s: %s", plugin_type, file_path, str(e))
+
+# Run plugin loader during scraper initialization
+load_plugins()
 
 # List of common User-Agents to avoid scraping detection
 USER_AGENTS = [
@@ -450,23 +494,40 @@ def _fetch_wayback_cache(url: str, timeout: int = 15) -> Optional[str]:
     """
     Retrieves the pre-rendered HTML page copy from the Internet Archive Wayback Machine.
     """
-    cache_url = f"https://web.archive.org/web/2/{url}"
-    logger.info("Querying Wayback Machine direct redirect cache for URL: %s", url)
-    
-    with wayback_cache_lock:
-        try:
-            # Stagger sequential requests to behave politely to Archive.org API
-            time.sleep(random.uniform(1.5, 3.0))
-            
-            # Request directly and let requests follow the 302/307 redirect
-            response = requests.get(cache_url, headers=get_headers(), timeout=timeout, allow_redirects=True)
-            if response.status_code == 200 and "web.archive.org/web/" in response.url:
-                logger.info("Wayback Machine cache hit found for URL: %s", url)
-                return response.text
-            else:
-                logger.warning("Wayback Machine returned status %d or redirected elsewhere for URL: %s", response.status_code if response else 0, url)
-        except Exception as e:
-            logger.error("Exception fetching Wayback Machine cache for %s: %s", url, str(e))
+    logger.info("Querying Wayback Machine availability API for URL: %s", url)
+    try:
+        # Step 1: Query the Wayback Availability API to get the closest status 200 capture
+        api_url = f"https://archive.org/wayback/available?url={urllib.parse.quote(url)}"
+        api_resp = requests.get(api_url, headers=get_headers(), timeout=timeout)
+        if api_resp.status_code == 200:
+            data = api_resp.json()
+            snapshot = data.get("archived_snapshots", {}).get("closest", {})
+            if snapshot.get("available") and snapshot.get("url"):
+                wayback_url = snapshot["url"]
+                
+                # Rewrite standard playback URL to raw id_ playback URL
+                if "/web/" in wayback_url and not "id_/" in wayback_url:
+                    parts = wayback_url.split("/web/")
+                    subparts = parts[1].split("/", 1)
+                    timestamp = subparts[0]
+                    if not timestamp.endswith("id_"):
+                        timestamp += "id_"
+                    wayback_url = f"{parts[0]}/web/{timestamp}/{subparts[1]}"
+                
+                logger.info("Wayback snapshot found: %s", wayback_url)
+                
+                with wayback_cache_lock:
+                    # Stagger sequential requests to behave politely to Archive.org API
+                    time.sleep(random.uniform(1.5, 3.0))
+                    response = requests.get(wayback_url, headers=get_headers(), timeout=timeout)
+                    if response.status_code == 200 and "web.archive.org/web/" in response.url:
+                        logger.info("Wayback Machine cache hit successfully loaded")
+                        return _clean_wayback_html(response.text)
+                    else:
+                        logger.warning("Wayback Machine returned status %d or redirected elsewhere for URL: %s", response.status_code if response else 0, url)
+    except Exception as e:
+        logger.error("Exception fetching Wayback Machine cache for %s: %s", url, str(e))
+        
     return None
 
 def _clean_wayback_html(html_content: str) -> str:
@@ -553,7 +614,7 @@ def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[
             logger.warning("YouTube transcript extraction failed. Falling back to Wayback Machine redirection.")
 
     # Check if this is a known SPA platform that returns empty shells without JS
-    is_spa = any(domain in url for domain in ["facebook.com", "instagram.com", "linkedin.com", "twitter.com", "x.com", "youtube.com", "youtu.be"])
+    is_spa = any(domain in url for domain in ["facebook.com", "instagram.com", "linkedin.com", "twitter.com", "x.com", "youtube.com", "youtu.be", "quora.com"])
     
     if is_spa:
         logger.info("Target URL: %s identified as SPA. Querying Wayback Archive...", url)
@@ -578,6 +639,16 @@ def scrape_url(url: str, timeout: int = 15, fallback_snippet: str = "") -> Dict[
 
     result = _perform_scrape_url(url, timeout)
     result["cached"] = False
+
+    # If direct scrape fails or gets blocked by a firewall, attempt fallback to Wayback Machine Cache
+    if not result.get("success") or "blocked" in str(result.get("error")).lower() or "403" in str(result.get("error")).lower():
+        logger.warning("Direct scrape failed or was blocked for URL: %s (error: %s). Querying Wayback Archive as fallback...", url, result.get("error"))
+        cached_html = _fetch_wayback_cache(url, timeout)
+        if cached_html:
+            fallback_res = _parse_html_to_scraped_dict(url, cached_html)
+            if fallback_res.get("success") and fallback_res.get("raw_text", "").strip():
+                result = fallback_res
+                result["cached"] = False
 
     # Apply fallback snippet if content is empty or boilerplate
     if result.get("success"):
@@ -622,6 +693,9 @@ def _is_bot_blocked(title: str, text: str) -> Optional[str]:
 
 def _get_youtube_video_id(url: str) -> Optional[str]:
     """Extracts the 11-character YouTube video ID from a URL."""
+    url_lower = url.lower()
+    if not ("youtube.com" in url_lower or "youtu.be" in url_lower):
+        return None
     match = re.search(r'(?:v=|\/|embed\/|shorts\/)([0-9A-Za-z_-]{11})', url)
     return match.group(1) if match else None
 
@@ -703,6 +777,39 @@ def _parse_html_to_scraped_dict(url: str, html_text: str) -> Dict[str, Any]:
     }
     
     try:
+        # Route to custom domain parser plugins if registered
+        try:
+            parsed_url = urllib.parse.urlparse(url)
+            hostname = (parsed_url.hostname or "").lower()
+            
+            custom_parser = None
+            for domain, parser in PLUGIN_REGISTRY.items():
+                if hostname == domain or hostname.endswith("." + domain):
+                    custom_parser = parser
+                    break
+                    
+            if custom_parser:
+                logger.info("Routing URL %s to custom plugin parser", url)
+                custom_data = custom_parser(html_text, url)
+                # If custom plugin did not explicitly specify success, default to True
+                if "success" not in custom_data:
+                    custom_data["success"] = True
+                result.update(custom_data)
+                
+                # Keep safety checks active (bot blockers) even for plugin parsers
+                block_signature = _is_bot_blocked(result["title"], result["raw_text"])
+                if block_signature:
+                    result["success"] = False
+                    result["error"] = f"Blocked by firewall (matched: {block_signature})"
+                    result["raw_text"] = ""
+                    result["paragraphs"] = []
+                    return result
+                    
+                # If custom plugin was matched, return its result directly to allow Wayback fallback on failures
+                return result
+        except Exception as pe:
+            logger.error("Custom plugin parser crashed on %s: %s. Falling back to default scraper.", url, str(pe))
+
         full_soup = BeautifulSoup(html_text, 'html.parser')
         
         # Try extracting Next.js / Nuxt SSR data first
@@ -862,7 +969,11 @@ def _perform_scrape_url(url: str, timeout: int = 15) -> Dict[str, Any]:
     }
     
     try:
-        response = utils.safe_request("get", url, headers=get_headers(), timeout=timeout, allow_redirects=True)
+        headers = get_headers()
+        if "sec.gov" in url.lower():
+            headers["User-Agent"] = "FocalHarvestResearchBot research@focalharvest.org"
+            
+        response = utils.safe_request("get", url, headers=headers, timeout=timeout, allow_redirects=True)
         if response.status_code != 200:
             result["error"] = f"HTTP status {response.status_code}"
             return result

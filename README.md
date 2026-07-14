@@ -79,7 +79,7 @@ Here is a real example of the structured Markdown report generated when research
 
 ## 📊 Manual Research vs. Focal Harvest
 
-| Workflow Step | Manual Research | 🌾 Focal Harvest |
+| Workflow Step | Manual Research | <img src="docs/assets/focal-harvest.png" width="18" valign="middle"> Focal Harvest |
 | :--- | :--- | :--- |
 | **Sourcing Info** | Opening multiple tabs and scanning pages | Automatic query orchestration via API or crawler |
 | **Data Cleaning** | Copying text and ignoring ads, headers, and footers | Automatic content sanitization using a **hybrid readability parser** |
@@ -99,13 +99,24 @@ Here is a real example of the structured Markdown report generated when research
 * **Optional 403 Bypass (`curl_cffi`)**: Native optional support for `curl_cffi`. If installed, the crawler impersonates Google Chrome's TLS/JA3 fingerprints to bypass Akamai and Cloudflare `403 Forbidden` bot-detection gates.
 
 ### 🧹 Cleaning & Parsing
+* **Wayback Machine Integration**: Automatically redirects protected SPA platforms (like Quora, Reddit, and Stack Overflow) to the Internet Archive to bypass bot firewalls and IP rate limits safely.
 * **Hybrid Parser**: Uses `readability-lxml` to extract clean, layout-stripped article content. Automatically falls back to full-soup structural cleaning on directory index pages (like Hacker News or GitHub) to prevent data loss.
 * **Local-First Caching**: Scraped pages are saved locally to `reports/cache/` using URL MD5 hashes. Subsequent requests load instantly from disk (bypassing the web completely to save network bandwidth and search credits).
 * **Terminal Cache Feedback**: Displays cache status indicators directly in the scraping table (`SUCCESS (CACHED)` in cyan vs `SUCCESS (LIVE)` in green).
 * **Anti-Bot Resilience**: Randomizes browser User-Agents and sends standard Google search referrers and Client Hints (`sec-ch-ua`) to mimic natural browser navigation.
+* **17+ Built-In Plugins**: Pre-configured scraping modules designed to target major platforms with specific layout cleaning rules:
+  * **Hacker News**: Extracts full thread comments and listings.
+  * **Reddit**: Bypasses dynamic elements using `.json` endpoint mappings and Wayback fallback comments trees.
+  * **Stack Overflow**: Formats code blocks, highlights accepted answers, and filters by score.
+  * **GitHub**: Cleans repository files, directory listings, issues, PRs, and discussions.
+  * **Academic Databases (arXiv, PubMed, Google Scholar)**: Formats abstracts, citations tables, DOI metadata, and authors metrics.
+  * **Blogs & Portals (Medium, Substack, Wikipedia, Quora, Dev.to)**: Sanitizes body prose and strips subscription overlays, edit links, references, and popups.
+  * **Finance & Markets (Yahoo Finance, SEC EDGAR)**: Extracts ticker pricing fin-streamers, company filings, and outputs financial tables as Markdown tables (with compliant user agents).
+  * **Dev Docs & E-Commerce (ReadTheDocs, Amazon, Product Hunt)**: Strips navigation TOC sidebars, formats product prices/ratings/features lists, and captures top launch comments.
 
 ### 🧠 Intelligence & Synthesis
 * **Multi-LLM Integrations**: Connects directly to Gemini 1.5 Flash, Claude 3.5 Sonnet, or GPT-4o-mini via REST endpoints.
+* **Multi-Provider LLM Failover**: Automatically tries your preferred AI API key and cascades gracefully across backup providers (Gemini ➡️ OpenAI ➡️ Claude) before dropping to the local offline summarizer if a key is invalid or rate-limited.
 * **Live Search Grounding**: Leverages Gemini’s search grounding tool to execute real-time web verification within the model.
 
 ### ⏱️ Monitoring & Alerts
@@ -214,14 +225,25 @@ Focal Harvest is built around five non-negotiable boundaries:
 
 * [x] Parallel concurrent crawler.
 * [x] Hybrid readability text parser.
-* [x] Multi-LLM provider endpoints (Gemini, Claude, GPT).
+* [x] Multi-LLM provider endpoints (Gemini, Claude, GPT) with Multi-Provider Failover.
 * [x] Live Google search grounding.
 * [x] Offline-first summarizer.
 * [x] Telegram and Discord integrations.
 * [x] Local text-browser history viewer.
-* [ ] **Plugin System**: Build hooks for custom parsing modules.
+* [x] Plugin System: Build hooks for custom parsing modules and 17+ built-in standard plugins.
 * [ ] **Incremental Updates**: Only alert or append to reports when new search changes are detected.
 * [ ] **PDF/JSON Exporters**: Output reports to PDF or structured CSV fields.
+
+---
+
+## ⚖️ Legal Disclaimer & Responsible Use
+
+Focal Harvest is a local command-line open-source utility designed strictly for personal, academic, and professional **research and educational purposes**. By using this tool, you agree to respect the following boundaries:
+
+1. **Public Data Scraping**: Scraping publicly accessible data (without logging in) is legally protected under established U.S. case law (*hiQ Labs v. LinkedIn*, *Meta v. Bright Data*, and *X Corp. v. Bright Data*). However, some platforms explicitly forbid automated scraping in their Terms of Service (ToS) and may implement blocks.
+2. **Logged-In Scraping Warning**: The scraper should not be used with active personal session cookies. Gaining authenticated access via automated scrapers breaches platform ToS and can result in the **immediate suspension or permanent ban** of your accounts. Use burner/research accounts exclusively if authenticating.
+3. **Respecting Server Resources**: Always run crawls with polite rate-limiting intervals (such as our default caches and retry backoffs) to respect target server load. Avoid heavy or parallel request volumes that could degrade server performance and constitute a "trespass to chattels."
+4. **No Central Database**: All data is cached and stored locally on your filesystem. The maintainers do not collect, transmit, or hold any scraped records. You are solely responsible for ensuring your data collection complies with regional privacy laws (such as GDPR, CCPA, and DPDP) regarding Personally Identifiable Information (PII).
 
 ---
 
