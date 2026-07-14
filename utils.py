@@ -57,7 +57,11 @@ def safe_request(method: str, url: str, **kwargs: Any) -> requests.Response:
             # Check if response status code triggers a retry
             if response.status_code in status_codes and attempt < max_retries:
                 attempt += 1
-                sleep_time = backoff_factor * (2 ** (attempt - 1)) + random.uniform(0.1, 0.5)
+                if response.status_code == 429:
+                    # Rate limit requires a longer cooling period to let the 60s window reset
+                    sleep_time = 10.0 * attempt + random.uniform(0.5, 1.5)
+                else:
+                    sleep_time = backoff_factor * (2 ** (attempt - 1)) + random.uniform(0.1, 0.5)
                 logger.warning("HTTP %d received for %s. Retrying %d/%d in %.2fs...", response.status_code, url, attempt, max_retries, sleep_time)
                 time.sleep(sleep_time)
                 continue
@@ -79,3 +83,40 @@ def safe_request(method: str, url: str, **kwargs: Any) -> requests.Response:
                 time.sleep(sleep_time)
                 continue
             raise e
+
+import threading
+
+class TokenBucket:
+    def __init__(self, capacity: float, fill_rate: float):
+        """
+        capacity: maximum tokens the bucket can hold
+        fill_rate: tokens refilled per second
+        """
+        self.capacity = float(capacity)
+        self.fill_rate = float(fill_rate)
+        self.tokens = float(capacity)
+        self.last_update = time.time()
+        self.lock = threading.Lock()
+
+    def consume(self, amount: float = 1.0) -> bool:
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_update
+            self.last_update = now
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.fill_rate)
+            if self.tokens >= amount:
+                self.tokens -= amount
+                return True
+            return False
+
+    def wait_for_token(self, amount: float = 1.0):
+        while True:
+            if self.consume(amount):
+                return
+            with self.lock:
+                now = time.time()
+                elapsed = now - self.last_update
+                current_tokens = min(self.capacity, self.tokens + elapsed * self.fill_rate)
+                needed = amount - current_tokens
+                sleep_time = needed / self.fill_rate
+            time.sleep(max(0.1, sleep_time))

@@ -265,5 +265,30 @@ class TestAnalyzer(unittest.TestCase):
         summary_no_match = analyzer.generate_local_summary(scraped_data_no_match, "python", "topic")
         self.assertIn("No highly relevant sentences matching your query could be extracted", summary_no_match)
 
+    def test_token_bucket_rate_limiter(self):
+        from utils import TokenBucket
+        import time
+        
+        # Capacity 2, fill rate 1 token per second
+        bucket = TokenBucket(capacity=2.0, fill_rate=1.0)
+        
+        # Can consume 2 tokens immediately
+        self.assertTrue(bucket.consume(1.0))
+        self.assertTrue(bucket.consume(1.0))
+        # Cannot consume a third token immediately
+        self.assertFalse(bucket.consume(1.0))
+        
+        # Wait 1.1 seconds, should refill 1 token
+        time.sleep(1.1)
+        self.assertTrue(bucket.consume(1.0))
+        self.assertFalse(bucket.consume(1.0))
+        
+        # Test wait_for_token blocks and lets us proceed
+        start_time = time.time()
+        bucket.wait_for_token(1.0)
+        duration = time.time() - start_time
+        # Duration should be at least 0.8s since we had 0 tokens
+        self.assertGreaterEqual(duration, 0.8)
+
 if __name__ == '__main__':
     unittest.main()

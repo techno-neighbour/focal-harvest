@@ -7,6 +7,9 @@ import math
 import utils
 logger = utils.setup_logging()
 
+# Rate limiter instance to keep LLM requests under 15 RPM (capacity 5, fill rate 0.25 tokens/sec)
+llm_governor = utils.TokenBucket(capacity=5.0, fill_rate=0.25)
+
 # A basic list of stop words to filter out during keyword analysis
 STOP_WORDS = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "arent", "as", "at", 
@@ -177,6 +180,7 @@ def generate_gemini_summary(scraped_data: List[Dict[str, Any]], query: str, spec
     Queries Gemini 1.5 Flash using direct HTTP requests to synthesize the scraped text content
     into a gorgeous, highly structured and professional Markdown Deep Dive report.
     """
+    llm_governor.wait_for_token()
     context_parts = []
     for idx, doc in enumerate(scraped_data):
         if doc.get("success"):
@@ -237,6 +241,7 @@ def generate_openai_summary(scraped_data: List[Dict[str, Any]], query: str, spec
     """
     Queries OpenAI's Chat Completion API (using gpt-4o-mini) to synthesize scraped content.
     """
+    llm_governor.wait_for_token()
     context_parts = []
     for idx, doc in enumerate(scraped_data):
         if doc.get("success"):
@@ -288,6 +293,7 @@ def generate_claude_summary(scraped_data: List[Dict[str, Any]], query: str, spec
     """
     Queries Anthropic's Messages API (using claude-3-5-sonnet-20241022) to synthesize scraped content.
     """
+    llm_governor.wait_for_token()
     context_parts = []
     for idx, doc in enumerate(scraped_data):
         if doc.get("success"):
@@ -418,6 +424,7 @@ def generate_gemini_grounding_search(query: str, spec_topic: str, api_key: str) 
     This lets the AI search Google directly, reason on real-time findings, and return a report.
     Returns a dict with "report" and "queries".
     """
+    llm_governor.wait_for_token()
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     
