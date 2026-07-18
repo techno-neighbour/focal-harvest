@@ -125,5 +125,82 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(mock_get.call_count, 2)
 
+    @patch('os.path.exists')
+    @patch('requests.get')
+    @patch('config_manager.load_config')
+    def test_safe_request_cookie_injection(self, mock_load, mock_get, mock_exists):
+        mock_exists.return_value = False
+        mock_load.return_value = {
+            "universal_cookies": {
+                "reddit.com": "reddit_session=foo_reddit; edgebucket=9tysvcJHlTXd6YvPJm"
+            }
+        }
+        
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_get.return_value = mock_response
+        
+        # 1. Test Reddit request (should auto-detect edgebucket cookie and set Edge User-Agent)
+        utils.safe_request("get", "https://www.reddit.com/r/test")
+        args, kwargs = mock_get.call_args
+        self.assertIn("headers", kwargs)
+        self.assertEqual(kwargs["headers"].get("Cookie"), "reddit_session=foo_reddit; edgebucket=9tysvcJHlTXd6YvPJm")
+        self.assertEqual(kwargs["headers"].get("User-Agent"), "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0")
+        
+        # Reset mocks
+        mock_get.reset_mock()
+        
+        # 3. Test custom User-Agent override
+        mock_load.return_value = {
+            "custom_user_agent": "CustomAgent/1.0"
+        }
+        utils.safe_request("get", "https://example.com")
+        args, kwargs = mock_get.call_args
+        self.assertIn("headers", kwargs)
+        self.assertEqual(kwargs["headers"].get("User-Agent"), "CustomAgent/1.0")
+
+        # Reset mocks
+        mock_get.reset_mock()
+
+        # 4. Test universal cookies mapping
+        mock_load.return_value = {
+            "universal_cookies": {
+                "linkedin.com": "li_at=foo_linkedin",
+                "twitter.com": "auth_token=foo_twitter"
+            }
+        }
+        utils.safe_request("get", "https://www.linkedin.com/feed/")
+        args, kwargs = mock_get.call_args
+        self.assertIn("headers", kwargs)
+        self.assertEqual(kwargs["headers"].get("Cookie"), "li_at=foo_linkedin")
+
+        # Reset mocks
+        mock_get.reset_mock()
+
+        # 5. Test auto-extraction mapping
+        mock_load.return_value = {
+            "auto_extract_cookies": True,
+            "browser_source": "chrome"
+        }
+        with patch('utils.get_cookies_from_browser') as mock_extract:
+            mock_extract.return_value = "session=foo_auto"
+            utils.safe_request("get", "https://facebook.com/home")
+            mock_extract.assert_called_once_with("facebook.com", "chrome")
+            args, kwargs = mock_get.call_args
+            self.assertIn("headers", kwargs)
+            self.assertEqual(kwargs["headers"].get("Cookie"), "session=foo_auto")
+
+        # Reset mocks
+        mock_get.reset_mock()
+
+        # 6. Test cookies.txt Netscape parser and fallback
+        mock_exists.side_effect = lambda path: True if path in ["cookies.txt", os.path.join("config", "cookies.txt")] else False
+        with patch('builtins.open', unittest.mock.mock_open(read_data=".reddit.com\tTRUE\t/\tFALSE\t0\treddit_session\tfoo_netscape\n")):
+            # Since cookies.txt is mocked to exist, it should override others
+            utils.safe_request("get", "https://www.reddit.com/r/test")
+            args, kwargs = mock_get.call_args
+            self.assertIn("headers", kwargs)
+            self.assertEqual(kwargs["headers"].get("Cookie"), "reddit_session=foo_netscape")
+
 if __name__ == '__main__':
     unittest.main()

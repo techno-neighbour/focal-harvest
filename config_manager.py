@@ -20,7 +20,12 @@ DEFAULT_CONFIG = {
     "retry_on_status_codes": [429, 500, 502, 503, 504],
     "cache_enabled": True,
     "cache_expiration_hours": 24,
-    "saved_searches": []
+    "smart_token_filtering": True,
+    "saved_searches": [],
+    "custom_user_agent": "",
+    "universal_cookies": {},
+    "auto_extract_cookies": False,
+    "browser_source": "any"
 }
 
 

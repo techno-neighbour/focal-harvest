@@ -3,13 +3,112 @@ import random
 import requests
 import logging
 import os
-from typing import Any
+from typing import Any, Optional, Dict
 import sys
 
 try:
     from curl_cffi import requests as requests_cffi
 except ImportError:
     requests_cffi = None
+
+try:
+    import rookiepy
+except ImportError:
+    rookiepy = None
+
+def get_cookies_from_browser(domain: str, browser: str = "any") -> Optional[str]:
+    """
+    Tries to decrypt and load cookies for a specific domain from local browser profiles using rookiepy.
+    """
+    if rookiepy is None:
+        return None
+    try:
+        browser_name = browser.lower()
+        if browser_name == "any":
+            method_name = "load"
+        else:
+            method_name = browser_name
+            
+        if hasattr(rookiepy, method_name):
+            method = getattr(rookiepy, method_name)
+            cookies_list = method(domains=[domain])
+            cookie_parts = []
+            for c in cookies_list:
+                name = c.get("name")
+                value = c.get("value")
+                if name and value:
+                    cookie_parts.append(f"{name}={value}")
+            return "; ".join(cookie_parts) if cookie_parts else None
+    except Exception as e:
+        setup_logging().warning("Automated browser cookie extraction failed for domain %s: %s", domain, str(e))
+    return None
+
+def parse_netscape_cookies(filepath: str) -> Dict[str, str]:
+    """
+    Parses a standard Netscape/Mozilla cookies.txt file and returns a dictionary
+    mapping domains to their formatted Cookie header strings.
+    """
+    cookies_by_domain = {}
+    if not os.path.exists(filepath):
+        return cookies_by_domain
+        
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 7:
+                    domain = parts[0].strip().lower()
+                    if domain.startswith("."):
+                        domain = domain[1:]
+                    name = parts[5].strip()
+                    value = parts[6].strip()
+                    
+                    if domain not in cookies_by_domain:
+                        cookies_by_domain[domain] = []
+                    cookies_by_domain[domain].append(f"{name}={value}")
+    except Exception as e:
+        setup_logging().warning("Error parsing Netscape cookies file %s: %s", filepath, str(e))
+        
+    formatted_cookies = {}
+    for domain, parts_list in cookies_by_domain.items():
+        formatted_cookies[domain] = "; ".join(parts_list)
+    return formatted_cookies
+
+def test_cookie_extraction_diagnostics() -> Dict[str, Any]:
+    """
+    Runs diagnostic checks on the cookie extraction engine.
+    Returns status and helpful suggestions on blocks or locks.
+    """
+    results = {
+        "rookiepy_installed": rookiepy is not None,
+        "status": "OK",
+        "message": "Automated cookie extraction is functional."
+    }
+    
+    if rookiepy is None:
+        results["status"] = "MISSING_DEPENDENCY"
+        results["message"] = "rookiepy library is not installed. Run 'pip install rookiepy' to enable auto-extraction."
+        return results
+        
+    try:
+        # Try a test extraction on a dummy domain to check OS permission / keychains
+        rookiepy.load(domains=["example.com"])
+    except PermissionError as pe:
+        results["status"] = "BLOCKED_BY_AV"
+        results["message"] = f"Access Denied: {str(pe)}. This is commonly caused by Windows Defender or local Antivirus blocking credential extraction. Please whitelist this directory."
+    except Exception as e:
+        err_msg = str(e)
+        if "lock" in err_msg.lower() or "database is locked" in err_msg.lower():
+            results["status"] = "DATABASE_LOCKED"
+            results["message"] = "Browser database is locked. Please close Chrome/Edge/Firefox completely before extracting cookies."
+        else:
+            results["status"] = "ERROR"
+            results["message"] = f"Extraction failed: {err_msg}"
+            
+    return results
 
 def setup_logging():
     """
@@ -46,9 +145,92 @@ def safe_request(method: str, url: str, **kwargs: Any) -> requests.Response:
     attempt = 0
     while True:
         try:
-            logger.info("Executing HTTP %s request to URL: %s (attempt %d)", method.upper(), url, attempt + 1)
+            # Auto-inject configured session cookies and user-agents from config if present
+            try:
+                import config_manager
+                config = config_manager.load_config()
+                
+                # Parse the target domain
+                import urllib.parse
+                parsed_url = urllib.parse.urlparse(url)
+                netloc = parsed_url.netloc.lower()
+
+                # Check for custom User-Agent override first
+                custom_ua = config.get("custom_user_agent")
+                if custom_ua:
+                    if "headers" not in kwargs or kwargs["headers"] is None:
+                        kwargs["headers"] = {}
+                    kwargs["headers"]["User-Agent"] = custom_ua
+                
+                matched_domain = None
+                cookie_val = None
+                
+                # 0. Check for a cookies.txt file (check config/cookies.txt first, then root fallback)
+                cookie_path = None
+                if os.path.exists(os.path.join("config", "cookies.txt")):
+                    cookie_path = os.path.join("config", "cookies.txt")
+                elif os.path.exists("cookies.txt"):
+                    cookie_path = "cookies.txt"
+                    
+                if cookie_path:
+                    netscape_cookies = parse_netscape_cookies(cookie_path)
+                    for dom in netscape_cookies:
+                        if netloc == dom or netloc.endswith("." + dom):
+                            cookie_val = netscape_cookies[dom]
+                            matched_domain = dom
+                            break
+                
+                # 1. Check auto-extraction next if enabled
+                if not cookie_val and config.get("auto_extract_cookies", False):
+                    parts = netloc.split(".")
+                    if len(parts) >= 2:
+                        root_domain = ".".join(parts[-2:])
+                        if len(parts) >= 3 and parts[-2] in ["com", "co", "org", "net", "edu", "gov"]:
+                            root_domain = ".".join(parts[-3:])
+                    else:
+                        root_domain = netloc
+                        
+                    cookie_val = get_cookies_from_browser(root_domain, config.get("browser_source", "any"))
+                    if cookie_val:
+                        matched_domain = root_domain
+                
+                # 2. Fallback to universal_cookies map
+                if not cookie_val:
+                    universal_cookies = config.get("universal_cookies", {})
+                    for dom in universal_cookies:
+                        if netloc == dom or netloc.endswith("." + dom):
+                            cookie_val = universal_cookies[dom]
+                            matched_domain = dom
+                            break
+                            
+                 # Apply cookie and autodetect Edge User-Agent matching
+                if cookie_val:
+                    if "headers" not in kwargs or kwargs["headers"] is None:
+                        kwargs["headers"] = {}
+                    kwargs["headers"]["Cookie"] = cookie_val
+                    # If the cookie has edgebucket and no custom User-Agent is set, default to Edge User-Agent to prevent 403 blocks
+                    if "edgebucket" in cookie_val and not custom_ua:
+                        kwargs["headers"]["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+                else:
+                    # If no cookies are configured, use Discordbot User-Agent to bypass Quora guest walls
+                    if "quora.com" in netloc and not custom_ua:
+                        if "headers" not in kwargs or kwargs["headers"] is None:
+                            kwargs["headers"] = {}
+                        kwargs["headers"]["User-Agent"] = "Discordbot/2.0 (+https://discordapp.com)"
+            except Exception:
+                pass
+
+            logger.info("Executing HTTP %s request to URL: %s (attempt %d) with headers: %s", method.upper(), url, attempt + 1, {k: (v[:30] + "..." if len(v) > 30 else v) for k, v in kwargs.get("headers", {}).items()})
             if requests_cffi is not None and 'unittest' not in sys.modules:
                 # Use curl_cffi to impersonate standard Chrome browser TLS/JA3 signatures
+                # Strip conflicting browser headers so curl_cffi generates consistent fingerprints
+                if "headers" in kwargs and kwargs["headers"]:
+                    cleaned = {}
+                    allowed = ["user-agent", "cookie", "accept", "accept-language", "authorization", "content-type"]
+                    for k, v in kwargs["headers"].items():
+                        if k.lower() in allowed:
+                            cleaned[k] = v
+                    kwargs["headers"] = cleaned
                 response = requests_cffi.request(method.lower(), url, impersonate="chrome", **kwargs)
             else:
                 req_func = getattr(requests, method.lower())

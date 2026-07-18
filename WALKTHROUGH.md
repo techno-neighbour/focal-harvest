@@ -122,6 +122,10 @@ This option lets you manage your API keys, preferred AI model, and notification 
    * **Discord Webhook URL** (Option `7`): Enter a Discord channel webhook URL to automatically push embedded updates.
    * **Telegram Bot Token & Chat ID** (Options `8` and `9`): Set Telegram bot credentials.
    * **Default Search Max Results** (Option `10`): Choose how many search result links to fetch (1-10, default is 5).
+   * **Custom User-Agent** (Option `11`): Enter a custom User-Agent to override default values.
+   * **Auto-Extract Cookies** (Option `12`): Enable automated decryption of session cookies from local browser profiles (Chrome/Edge/Firefox).
+   * **Target Browser Source** (Option `13`): Set which local browser to search for cookies (Chrome, Edge, Firefox, Brave, or any).
+   * **Configure Universal Cookie Map** (Option `14`): Enter custom cookie strings mapped to specific domains to bypass login walls.
 3. **Persistence**: Saves configuration parameters directly to `config.json` in your workspace directory. They are automatically loaded the next time you boot the program.
 
 
@@ -170,3 +174,38 @@ This option lets you review past search results and read reports without opening
 │  Notifier Exports (JSON/MD) & Dispatches Webhooks/Alerts │
 └──────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 🍪 Cookie Troubleshooting & Anti-Bot Bypass
+
+When scraping sites with heavy login walls or anti-bot shields (like Reddit, Quora, or LinkedIn), importing session cookies is highly effective. Focal Harvest supports three ways of using cookies:
+1. **Unified `cookies.txt` File (Highly Recommended)**: Export your browser cookies using an extension like *EditThisCookie* (using the Netscape format), and save the file to `config/cookies.txt`. This is ignored by git and provides a complete cookie jar, which is mandatory for bypassing Quora login walls.
+2. **Universal Cookie Map (Option 14)**: Paste specific domain-to-cookie-string mappings directly in the Settings menu, which parses them from `config.json`.
+3. **Automated Extraction (Option 12)**: Automatically extracts active cookies from your local browser (Chrome/Edge/Firefox) profiles at runtime.
+
+### 🌟 Conditional User-Agent Routing
+To avoid Cloudflare's bot-detection firewalls:
+* **With Cookies**: If a session cookie is supplied (via `cookies.txt` or the map), the client automatically routes using a **standard Chrome browser User-Agent**. This makes the connection look like a real, logged-in user and prevents the bot/cookie mismatch block.
+* **Without Cookies (Guest)**: If no cookies are set, the scraper overrides the User-Agent to **`Discordbot/2.0 (+https://discordapp.com)`**. This triggers Quora/social preview bypasses, retrieving the fully pre-rendered static HTML with hundreds of posts/answers without requiring a login!
+
+### ⚠️ Operational Caveats for Automated Extraction (Option 12)
+
+#### 1. Antivirus / Antimalware Alerts
+* **Why it happens**: Local security monitors (like Windows Defender) flag python scripts that decrypt local browser credential databases because infostealers/malware use the exact same file access APIs.
+* **The Solution**: 
+  * Add your script folder to your local Antivirus exclusions/whitelist.
+  * Avoid compiling the scraper to a single standalone `.exe` using PyInstaller.
+  * Alternatively, fall back to the manual `config/cookies.txt` file which doesn't access any protected system files.
+
+#### 2. Database Locking
+* **Why it happens**: SQLite databases only support a single write lock. If your browser (Chrome/Edge/Firefox) is active, it locks the database file, preventing `rookiepy` from reading it.
+* **The Solution**: 
+  * Ensure you close the browser completely before running the TUI scraper.
+  * Or, manually export the cookies as a Netscape-format text file and save it to `config/cookies.txt`.
+
+#### 3. Portability Failures (Headless / VMs)
+* **Why it happens**: Cloud VMs (AWS, Docker containers, GitHub Actions) do not run desktop environments and do not contain Chrome/Firefox profiles to extract from.
+* **The Solution**:
+  * Keep `Auto-Extract Cookies` disabled in production.
+  * Manually drop your cookies in `config/cookies.txt` or paste them under the **Universal Cookie Map** (Option 14) in the settings menu, which parses them statically from `config.json` without searching the host machine.

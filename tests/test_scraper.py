@@ -801,7 +801,13 @@ class Test(unittest.TestCase):
         self.assertIn("Score: 150 | Comments: 25", res["raw_text"])
         self.assertIn("https://reddit.com/r/opensource/comments/123/cool_project", res["raw_text"])
 
-    def test_reddit_listing_html_parsing(self):
+    @patch('utils.safe_request')
+    def test_reddit_listing_html_parsing(self, mock_safe):
+        # Force JSON fetch failure to trigger HTML fallback parsing
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_safe.return_value = mock_resp
+
         from std_plugins import reddit
         
         html_content = """
@@ -827,7 +833,13 @@ class Test(unittest.TestCase):
         self.assertIn("Score: 320 | 15 comments", res["raw_text"])
         self.assertIn("Posted by: @osi_author", res["raw_text"])
 
-    def test_reddit_redesign_html_parsing(self):
+    @patch('utils.safe_request')
+    def test_reddit_redesign_html_parsing(self, mock_safe):
+        # Force JSON fetch failure to trigger HTML fallback parsing
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_safe.return_value = mock_resp
+
         from std_plugins import reddit
         
         html_content = """
@@ -1416,6 +1428,21 @@ class Test(unittest.TestCase):
         self.assertIn("Tagline: An AI OSINT research automation CLI.", res["raw_text"])
         self.assertIn("Focal Harvest is an open-source OSINT research automation script.", res["raw_text"])
         self.assertIn("* **Hunter1**: \"Great tool for research workflow!\"", res["raw_text"])
+
+    def test_clean_slug_url(self):
+        # Reddit URL cleaning
+        reddit_full = "https://www.reddit.com/r/watchesindia/comments/1fsycjm/what_are_you_honest_thoughts_about_smartwatches/"
+        reddit_expected = "https://www.reddit.com/r/watchesindia/comments/1fsycjm"
+        self.assertEqual(scraper._clean_slug_url(reddit_full), reddit_expected)
+
+        # Stack Overflow URL cleaning
+        so_full = "https://stackoverflow.com/questions/11227809/why-is-processing-a-sorted-array-faster-than-an-unsorted-array"
+        so_expected = "https://stackoverflow.com/questions/11227809"
+        self.assertEqual(scraper._clean_slug_url(so_full), so_expected)
+
+        # Unaffected URL
+        unaffected = "https://www.wikipedia.org/wiki/Artificial_intelligence"
+        self.assertIsNone(scraper._clean_slug_url(unaffected))
 
 if __name__ == '__main__':
     unittest.main()

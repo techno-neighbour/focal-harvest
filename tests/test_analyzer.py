@@ -290,5 +290,72 @@ class TestAnalyzer(unittest.TestCase):
         # Duration should be at least 0.8s since we had 0 tokens
         self.assertGreaterEqual(duration, 0.8)
 
+    def test_smart_sentence_filtering(self):
+        text = (
+            "This is the first sentence anchor. "  # Anchor 1
+            "This is the second sentence anchor. " # Anchor 2
+            "Too short. "                          # Too short (< 5 words)
+            "This sentence is way too long. "
+            "It has many words. "
+            "Let us duplicate words to exceed sixty. "
+            "One two three four five six seven eight nine ten "
+            "eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty "
+            "twentyone twentytwo twentythree twentyfour twentyfive twentysix twentyseven twentyeight twentynine thirty "
+            "thirtyone thirtytwo thirtythree thirtyfour thirtyfive thirtysix thirtyseven thirtyeight thirtynine forty "
+            "fortyone fortytwo fortythree fortyfour fortyfive fortysix fortyseven fortyeight fortynine fifty "
+            "fiftyone fiftytwo fiftythree fiftyfour fiftyfive fiftysix fiftyseven fiftyeight fiftynine sixty sixtyone. " # Too long (> 60 words)
+            "The core Gemini pricing structure is highly optimized. " # High relevance match
+            "This is just an unrelated filler sentence with no keywords." # No keyword match
+        )
+        
+        dense_text = analyzer.filter_dense_context(text, "Gemini pricing", "Optimize budget", max_sentences=5)
+        
+        # Should contain Anchor 1
+        self.assertIn("This is the first sentence anchor", dense_text)
+        # Should contain Anchor 2
+        self.assertIn("This is the second sentence anchor", dense_text)
+        # Should contain the high relevance matched sentence
+        self.assertIn("Gemini pricing structure is highly optimized", dense_text)
+        # Should NOT contain too short sentence
+        self.assertNotIn("Too short", dense_text)
+        # Should NOT contain too long sentence
+        self.assertNotIn("sixtyone", dense_text)
+        # Should NOT contain unrelated filler
+        self.assertNotIn("unrelated filler sentence", dense_text)
+
+    def test_content_classifier(self):
+        # Dialogue heavy text
+        narrative_text = (
+            "\"Hello!\" she said. \"How are you doing today?\" "
+            "\"I am fine,\" John replied, holding his bag. \"We should go to our house.\""
+        )
+        # Informational text
+        info_text = (
+            "Artificial intelligence is a branch of computer science. "
+            "The industry grew significantly in the year 2020. "
+            "Data centers consume large amounts of electricity."
+        )
+        
+        self.assertEqual(analyzer._classify_content_style(narrative_text), "narrative")
+        self.assertEqual(analyzer._classify_content_style(info_text), "informational")
+
+    def test_text_rank_extraction(self):
+        # A set of sentences where sentences share overlapping vocabulary terms
+        sentences = [
+            "Python programming language is great for developers.",
+            "Developers love coding in Python.",
+            "Coding in Java is also popular among developers.",
+            "This is a completely random sentence with no common words.",
+            "Another filler line about fruits and oranges."
+        ]
+        keywords = {"Python", "developers", "coding"}
+        
+        # Run TextRank extraction
+        extracted = analyzer.text_rank_extract(sentences, keywords, max_sentences=2)
+        
+        # The top sentences should be the highly connected ones (Developers / Python / Coding)
+        self.assertEqual(len(extracted), 2)
+        self.assertTrue(any("Python" in s or "Coding" in s for s in extracted))
+
 if __name__ == '__main__':
     unittest.main()

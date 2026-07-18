@@ -1,4 +1,5 @@
 import urllib.parse
+import re
 from typing import Dict, Any, List
 from bs4 import BeautifulSoup
 
@@ -86,6 +87,42 @@ def parse(html_text: str, url: str) -> Dict[str, Any]:
                 "formatted": f"### Answer by {author}{cred_str}\n{answer_text}\n"
             })
             
+    # Fallback to serialized Relay state extraction if standard classes yielded no answers (SPA shell layout)
+    if not answers_data:
+        scripts = soup.find_all("script")
+        target_script = ""
+        for s in scripts:
+            text = s.string or ""
+            if "ansFrontendGlobals.data" in text:
+                if len(text) > len(target_script):
+                    target_script = text
+                    
+        if target_script:
+            pattern = r'\\*\"text\\*\"\s*:\s*\\*\"([^\"]+?)\\*\"'
+            matches = re.findall(pattern, target_script)
+            
+            long_paras = []
+            for m in matches:
+                # Clean up escaping
+                cleaned = m.replace('\\\\"', '"').replace('\\"', '"').replace('\\\\/', '/').replace('\\/', '/').strip()
+                try:
+                    cleaned = cleaned.encode('utf-8').decode('unicode_escape')
+                except Exception:
+                    pass
+                if len(cleaned) > 50 and not cleaned.startswith("http") and cleaned not in long_paras:
+                    long_paras.append(cleaned)
+                    
+            if long_paras:
+                for idx, para in enumerate(long_paras):
+                    # Clean up common double escaped unicode characters
+                    para = para.replace('\\u2019', "'").replace('\\u201c', '"').replace('\\u201d', '"').replace('\\u2014', '—')
+                    answers_data.append({
+                        "author": f"Community Contributor #{idx+1}",
+                        "credential": "",
+                        "text": para,
+                        "formatted": f"### Contribution #{idx+1}\n{para}\n"
+                    })
+
     # Format the complete output document
     formatted_answers = []
     for item in answers_data:

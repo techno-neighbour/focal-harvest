@@ -175,16 +175,187 @@ def generate_local_summary(scraped_data: List[Dict[str, Any]], query: str, spec_
         
     return "\n".join(markdown_lines)
 
+def _classify_content_style(text: str) -> str:
+    """
+    Classifies text as 'narrative' (stories, interviews, transcripts) 
+    or 'informational' (news, Wikipedia, reports).
+    """
+    # 1. Count quote/dialogue marks (double quotes, curly quotes, and boundary-aligned single quotes)
+    quotes = len(re.findall(r'["“”«»]|(?:\s\'|\'\s)', text))
+    words = len(text.split())
+    if words == 0:
+        return "informational"
+        
+    quote_density = quotes / words
+    
+    # 2. Count narrative pronouns (I, me, my, we, us, our)
+    narrative_pronouns = len(re.findall(r'\b(i|me|my|we|us|our)\b', text.lower()))
+    pronoun_density = narrative_pronouns / words
+    
+    # Heuristic gate: Dialogue-heavy or high personal narrative density
+    if quote_density > 0.015 or pronoun_density > 0.04:
+        return "narrative"
+    return "informational"
+
+def text_rank_extract(sentences: List[str], query_keywords: Set[str], max_sentences: int = 15) -> List[str]:
+    """
+    Ranks sentences using the PageRank algorithm over a sentence Jaccard similarity graph.
+    """
+    n = len(sentences)
+    if n <= max_sentences:
+        return sentences
+        
+    # Pre-tokenize sentences to sets of lowercase keywords
+    sentence_words = []
+    for sent in sentences:
+        words = extract_keywords(sent)
+        sentence_words.append(words)
+        
+    # Build Similarity Adjacency Matrix
+    # similarity(A, B) = size of intersection / size of union
+    weights = [[0.0] * n for _ in range(n)]
+    out_sums = [0.0] * n
+    for i in range(n):
+        for j in range(i + 1, n):
+            words_a = sentence_words[i]
+            words_b = sentence_words[j]
+            intersection = len(words_a.intersection(words_b))
+            union = len(words_a.union(words_b))
+            
+            if union > 0:
+                sim = intersection / union
+                weights[i][j] = sim
+                weights[j][i] = sim
+                out_sums[i] += sim
+                out_sums[j] += sim
+
+    # PageRank Iteration (Damping factor = 0.85)
+    d = 0.85
+    scores = [1.0 / n] * n
+    
+    for _ in range(15):  # 15 power iterations
+        new_scores = [0.0] * n
+        for i in range(n):
+            sum_incoming = 0.0
+            for j in range(n):
+                if out_sums[j] > 0:
+                    sum_incoming += (scores[j] * weights[j][i]) / out_sums[j]
+            new_scores[i] = (1 - d) / n + d * sum_incoming
+        scores = new_scores
+
+    # Score sentence list: (score, original_index, sentence_text)
+    scored_sentences = []
+    for i in range(n):
+        # Boost sentences slightly if they match query keywords to keep query relevance
+        query_boost = 1.0 + 0.5 * len(query_keywords.intersection(sentence_words[i]))
+        final_score = scores[i] * query_boost
+        
+        # Length filter: Skip short/long lines
+        words_cnt = len(sentences[i].split())
+        if 5 <= words_cnt <= 60:
+            scored_sentences.append((final_score, i, sentences[i]))
+
+    # Sort by PageRank score descending, select top matches
+    if not scored_sentences:
+        return sentences[:max_sentences]
+        
+    scored_sentences.sort(key=lambda x: x[0], reverse=True)
+    top_matches = scored_sentences[:max_sentences]
+    
+    # Sort back into chronological order
+    top_matches.sort(key=lambda x: x[1])
+    return [item[2] for item in top_matches]
+
+def lead_bias_extract(sentences: List[str], keywords: Set[str], max_sentences: int = 15) -> List[str]:
+    """
+    Extracts high-value sentences using position-weighted query keyword salience.
+    """
+    if len(sentences) <= max_sentences:
+        return sentences
+        
+    # Always include the first 2 sentences as structural anchors
+    final_selections = []
+    final_selections.append((999.0, 0, sentences[0]))
+    final_selections.append((999.0, 1, sentences[1]))
+    
+    scored_sentences = []
+    for idx, sent in enumerate(sentences[2:]):
+        # 1. Skip gibberish / layout junk (length filters)
+        word_count = len(sent.split())
+        if word_count < 5 or word_count > 60:
+            continue
+            
+        # 2. Score based on UNIQUE keyword matches
+        unique_matches = keywords.intersection(extract_keywords(sent))
+        if not unique_matches:
+            continue
+            
+        # Score calculation: unique matches * 2.0 + position weight (favor earlier sentences slightly)
+        pos_weight = 1.0 / math.sqrt(idx + 3)
+        score = len(unique_matches) * 2.0 + pos_weight
+        
+        scored_sentences.append((score, idx + 2, sent))
+        
+    if not scored_sentences:
+        return sentences[:max_sentences]
+        
+    # Sort by score descending and take top matches
+    scored_sentences.sort(key=lambda x: x[0], reverse=True)
+    best_matches = scored_sentences[:max_sentences - 2]
+    
+    for item in best_matches:
+        final_selections.append(item)
+        
+    # Sort chronologically by original index
+    final_selections.sort(key=lambda x: x[1])
+    return [item[2] for item in final_selections]
+
+def filter_dense_context(raw_text: str, query: str, spec_topic: str, max_sentences: int = 15) -> str:
+    """
+    Strips down raw text to the most relevant sentences matching the query keywords.
+    Dynamically routes between TextRank (for narratives) and Lead-Bias (for informational articles).
+    """
+    keywords = extract_keywords(query).union(extract_keywords(spec_topic))
+    if not keywords:
+        return raw_text[:2000]
+        
+    sentences = split_into_sentences(raw_text)
+    if len(sentences) < 5:
+        return raw_text[:2000]
+        
+    # Classify content type
+    style = _classify_content_style(raw_text)
+    
+    if style == "narrative":
+        logger.info("Narrative/Dialogue pattern detected. Using Graph-based TextRank summarization...")
+        selected_sentences = text_rank_extract(sentences, keywords, max_sentences)
+    else:
+        logger.info("Informational pattern detected. Using Position-Weighted Lead-Bias summarization...")
+        selected_sentences = lead_bias_extract(sentences, keywords, max_sentences)
+        
+    return " ".join(selected_sentences)
+
 def generate_gemini_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str, raise_on_error: bool = False) -> str:
     """
     Queries Gemini 1.5 Flash using direct HTTP requests to synthesize the scraped text content
     into a gorgeous, highly structured and professional Markdown Deep Dive report.
     """
     llm_governor.wait_for_token()
+    try:
+        import config_manager
+        config = config_manager.load_config()
+        use_filtering = config.get("smart_token_filtering", True)
+    except Exception:
+        use_filtering = True
+
     context_parts = []
     for idx, doc in enumerate(scraped_data):
         if doc.get("success"):
-            text_content = doc.get("raw_text", "")[:4000]
+            raw_text = doc.get("raw_text", "")
+            if use_filtering:
+                text_content = filter_dense_context(raw_text, query, spec_topic, max_sentences=15)
+            else:
+                text_content = raw_text[:4000]
             context_parts.append(f"Source {idx+1}: {doc['title']} ({doc['url']})\nContent:\n{text_content}\n---\n")
             
     context_str = "\n".join(context_parts)
@@ -242,10 +413,21 @@ def generate_openai_summary(scraped_data: List[Dict[str, Any]], query: str, spec
     Queries OpenAI's Chat Completion API (using gpt-4o-mini) to synthesize scraped content.
     """
     llm_governor.wait_for_token()
+    try:
+        import config_manager
+        config = config_manager.load_config()
+        use_filtering = config.get("smart_token_filtering", True)
+    except Exception:
+        use_filtering = True
+
     context_parts = []
     for idx, doc in enumerate(scraped_data):
         if doc.get("success"):
-            text_content = doc.get("raw_text", "")[:4000]
+            raw_text = doc.get("raw_text", "")
+            if use_filtering:
+                text_content = filter_dense_context(raw_text, query, spec_topic, max_sentences=15)
+            else:
+                text_content = raw_text[:4000]
             context_parts.append(f"Source {idx+1}: {doc['title']} ({doc['url']})\nContent:\n{text_content}\n---\n")
             
     context_str = "\n".join(context_parts)
@@ -294,10 +476,21 @@ def generate_claude_summary(scraped_data: List[Dict[str, Any]], query: str, spec
     Queries Anthropic's Messages API (using claude-3-5-sonnet-20241022) to synthesize scraped content.
     """
     llm_governor.wait_for_token()
+    try:
+        import config_manager
+        config = config_manager.load_config()
+        use_filtering = config.get("smart_token_filtering", True)
+    except Exception:
+        use_filtering = True
+
     context_parts = []
     for idx, doc in enumerate(scraped_data):
         if doc.get("success"):
-            text_content = doc.get("raw_text", "")[:4000]
+            raw_text = doc.get("raw_text", "")
+            if use_filtering:
+                text_content = filter_dense_context(raw_text, query, spec_topic, max_sentences=15)
+            else:
+                text_content = raw_text[:4000]
             context_parts.append(f"Source {idx+1}: {doc['title']} ({doc['url']})\nContent:\n{text_content}\n---\n")
             
     context_str = "\n".join(context_parts)

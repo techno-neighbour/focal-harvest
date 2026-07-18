@@ -1,6 +1,8 @@
 # API Keys & Local Configurations
 config.json
 .env
+cookies.txt
+config/
 
 # Generated Scraper Reports & Raw Data
 reports/

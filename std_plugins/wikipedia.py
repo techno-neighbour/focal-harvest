@@ -21,8 +21,13 @@ def parse(html_text: str, url: str) -> Dict[str, Any]:
             title = title[:-len(suffix)].strip()
             
     # 2. Locate main content parser output div
-    parser_output = soup.find(class_="mw-parser-output")
-    target_el = parser_output if parser_output else soup.find(id="bodyContent")
+    parser_outputs = soup.find_all(class_="mw-parser-output")
+    target_el = None
+    if parser_outputs:
+        # Find the one with the maximum text length to ignore empty metadata wrappers
+        target_el = max(parser_outputs, key=lambda x: len(x.get_text()))
+    if not target_el:
+        target_el = soup.find(id="bodyContent")
     if not target_el:
         target_el = soup.find('body') or soup
         

@@ -52,7 +52,7 @@ def show_banner():
     banner_panel = Panel(
         Align.center(gradient_text),
         border_style="bright_blue",
-        subtitle="V1.1.0 • Local extractive summarizer, SSR Extractors, & AI Engine ready"
+        subtitle="v1.2.0 • Local extractive summarizer, SSR Extractors, & AI Engine ready"
     )
     console.print(banner_panel)
 
@@ -94,6 +94,12 @@ def configure_settings_menu():
         discord_masked = config.get("discord_webhook")[:25] + "..." if config.get("discord_webhook") else "[yellow]Not Set[/yellow]"
         tg_token_masked = "•" * 15 if config.get("telegram_token") else "[yellow]Not Set[/yellow]"
         tg_chat_masked = config.get("telegram_chat_id") if config.get("telegram_chat_id") else "[yellow]Not Set[/yellow]"
+        ua_masked = config.get("custom_user_agent")[:25] + "..." if config.get("custom_user_agent") else "[yellow]Not Set (Auto-detects Edge/Chrome)[/yellow]"
+        
+        auto_extract_status = "[green]Enabled[/green]" if config.get("auto_extract_cookies", False) else "[yellow]Disabled[/yellow]"
+        browser_src_val = config.get("browser_source", "any").upper()
+        cookie_map_count = len(config.get("universal_cookies", {}))
+        cookie_map_status = f"[green]{cookie_map_count} domain(s) configured[/green]" if cookie_map_count > 0 else "[yellow]None[/yellow]"
         
         table.add_row("1", "Gemini API Key", gemini_masked)
         table.add_row("2", "OpenAI API Key", openai_masked)
@@ -105,9 +111,13 @@ def configure_settings_menu():
         table.add_row("8", "Telegram Bot Token", tg_token_masked)
         table.add_row("9", "Telegram Chat ID", tg_chat_masked)
         table.add_row("10", "Default Search Max Results", str(config.get("default_max_results", 5)))
+        table.add_row("11", "Custom User-Agent", ua_masked)
+        table.add_row("12", "Auto-Extract Cookies", auto_extract_status)
+        table.add_row("13", "Target Browser Source", browser_src_val)
+        table.add_row("14", "Configure Universal Cookie Map", cookie_map_status)
         
         console.print(table)
-        console.print("[cyan]Choose a setting to modify (1-10), or type [bold green]back[/bold green] to return to the main menu.[/cyan]")
+        console.print("[cyan]Choose a setting to modify (1-14), or type [bold green]back[/bold green] to return to the main menu.[/cyan]")
         
         choice = Prompt.ask("Your selection", default="back")
         if choice.lower() == "back":
@@ -148,6 +158,105 @@ def configure_settings_menu():
                 console.print("[red]Invalid number.[/red]")
                 time.sleep(1)
                 continue
+        elif choice == "11":
+            ua = Prompt.ask("Enter Custom User-Agent (leave empty to clear)")
+            config["custom_user_agent"] = ua
+        elif choice == "12":
+            try:
+                import rookiepy
+                rookiepy_installed = True
+            except ImportError:
+                rookiepy_installed = False
+                
+            if not rookiepy_installed:
+                console.print("\n[bold yellow]⚠ Warning: 'rookiepy' library is not installed.[/bold yellow]")
+                console.print("Automated cookie extraction requires this library to decrypt local browser database files.")
+                confirm = Prompt.ask("Would you like to try installing it automatically now? (y/n)", choices=["y", "n"], default="y")
+                if confirm.lower() == "y":
+                    console.print("[cyan]Running 'python -m pip install rookiepy'...[/cyan]")
+                    os.system("python -m pip install rookiepy")
+                    try:
+                        import rookiepy
+                        rookiepy_installed = True
+                        console.print("[bold green]rookiepy installed successfully![/bold green]")
+                        time.sleep(1)
+                    except ImportError:
+                        console.print("[red]Failed to install rookiepy automatically. Please run 'pip install rookiepy' in your terminal manually.[/red]")
+                        time.sleep(3)
+                        continue
+                else:
+                    continue
+            
+            if rookiepy_installed:
+                auto_val = config.get("auto_extract_cookies", False)
+                console.print("\n[bold red]⚠ WARNING:[/bold red] Enabling automatic cookie extraction will decrypt cookies from your local browser profile directories.")
+                console.print("This is safe, but on some systems with strict corporate monitors, it can trigger heuristic antivirus warnings.")
+                toggle = Prompt.ask("Enable auto-extraction?", choices=["yes", "no"], default="yes" if not auto_val else "no")
+                config["auto_extract_cookies"] = (toggle == "yes")
+        elif choice == "13":
+            bs = Prompt.ask("Choose Browser Source for extraction (any, chrome, edge, firefox, brave)", choices=["any", "chrome", "edge", "firefox", "brave"], default=config.get("browser_source", "any"))
+            config["browser_source"] = bs
+        elif choice == "14":
+            while True:
+                console.clear()
+                show_banner()
+                universal_cookies = config.get("universal_cookies", {})
+                
+                table_cookies = Table(title="🌐 Universal Cookie Map", border_style="cyan")
+                table_cookies.add_column("No.", style="cyan", justify="center")
+                table_cookies.add_column("Domain", style="yellow")
+                table_cookies.add_column("Cookie Value", style="white")
+                
+                domains = sorted(list(universal_cookies.keys()))
+                for idx, dom in enumerate(domains):
+                    val_masked = "•" * 15 if universal_cookies[dom] else "[red]Empty[/red]"
+                    table_cookies.add_row(str(idx + 1), dom, val_masked)
+                    
+                console.print(table_cookies)
+                console.print("[cyan]Select a domain number to edit/delete, type [bold green]add[/bold green] to configure a new domain, or type [bold green]back[/bold green] to return.[/cyan]")
+                
+                cookie_choice = Prompt.ask("Your selection", default="back")
+                if cookie_choice.lower() == "back":
+                    break
+                elif cookie_choice.lower() == "add":
+                    new_dom = Prompt.ask("Enter Domain Name (e.g. facebook.com, linkedin.com)").strip().lower()
+                    if new_dom:
+                        console.print("\n[bold red]⚠ WARNING:[/bold red] Using session cookies violates Terms of Service and can result in account suspension.")
+                        new_cookie = Prompt.ask("Enter Cookie Value (e.g. c_user=...;)", password=True)
+                        universal_cookies[new_dom] = new_cookie
+                        config["universal_cookies"] = universal_cookies
+                        config_manager.save_config(config)
+                        console.print(f"[bold green]Added cookie for {new_dom} successfully![/bold green]")
+                        time.sleep(1)
+                else:
+                    try:
+                        val = int(cookie_choice)
+                        if 1 <= val <= len(domains):
+                            selected_dom = domains[val - 1]
+                            console.print(f"\n[bold yellow]Selected Domain:[/bold yellow] {selected_dom}")
+                            action = Prompt.ask("Choose action (edit, delete, back)", choices=["edit", "delete", "back"], default="edit")
+                            if action == "edit":
+                                console.print("\n[bold red]⚠ WARNING:[/bold red] Using session cookies violates Terms of Service.")
+                                new_cookie = Prompt.ask("Enter new Cookie Value", password=True)
+                                universal_cookies[selected_dom] = new_cookie
+                                config["universal_cookies"] = universal_cookies
+                                config_manager.save_config(config)
+                                console.print(f"[bold green]Updated cookie for {selected_dom} successfully![/bold green]")
+                                time.sleep(1)
+                            elif action == "delete":
+                                del universal_cookies[selected_dom]
+                                config["universal_cookies"] = universal_cookies
+                                config_manager.save_config(config)
+                                console.print(f"[bold green]Deleted cookie for {selected_dom} successfully![/bold green]")
+                                time.sleep(1)
+                        else:
+                            console.print("[red]Invalid domain number.[/red]")
+                            time.sleep(1)
+                    except ValueError:
+                        console.print("[red]Please enter a valid choice.[/red]")
+                        time.sleep(1)
+            # Skip standard saved confirmation because it was handled inside the loop
+            continue
         else:
             console.print("[red]Invalid choice.[/red]")
             time.sleep(1)
