@@ -1,7 +1,6 @@
 import urllib.parse
 import sys
 import requests
-import httpx
 import asyncio
 from bs4 import BeautifulSoup
 from readability import Document

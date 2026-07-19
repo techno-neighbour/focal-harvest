@@ -1,6 +1,8 @@
 # <img src="docs/assets/focal-harvest.png" width="38" valign="middle"> Focal Harvest
 
-Focal Harvest is a lightweight, open-source CLI web research automation pipeline and OSINT scraper built in Python. It automates the manual workflow of querying search engines, scraping target URLs, sanitizing raw HTML content, and synthesizing findings using Gemini, Claude, and GPT-4o-mini APIs, with a zero-config local statistical fallback for offline operation.
+Focal Harvest is a lightweight Python CLI tool with two primary use-cases, featuring a zero-config local statistical fallback for offline operation:
+* **Automated Research Pipeline**: Query search engines, scrape and clean target pages, and synthesize findings into structured reports using Gemini, Claude, or GPT-4o-mini.
+* **OSINT Collection Framework**: Monitor topics across Reddit, Hacker News, Stack Overflow, arXiv, and 17+ platforms with daemon scheduling, Wayback Machine fallbacks, and Discord/Telegram alert dispatch.
 
 [![GitHub Release](https://img.shields.io/github/v/release/techno-neighbour/focal-harvest?color=blue)](https://github.com/techno-neighbour/focal-harvest)
 [![License](https://img.shields.io/github/license/techno-neighbour/focal-harvest?color=green)](https://github.com/techno-neighbour/focal-harvest/blob/main/LICENSE)
@@ -9,13 +11,13 @@ Focal Harvest is a lightweight, open-source CLI web research automation pipeline
 <!-- Hero Demo GIF -->
 ![Focal Harvest Demo](docs/assets/demo.gif)
 
-```text
+```
 Python • AI Agent • Web Research • CLI • Zero-Config Offline Fallback
 ```
 
 ---
 
-## ⚡ Quick Start (BLUF / Get Started in 30 Seconds)
+## ⚡ Quick Start (Get Started in 30 Seconds)
 
 ### Installation
 Ensure you have Python 3.12+ installed. Run the platform-independent installer:
