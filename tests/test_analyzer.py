@@ -357,5 +357,47 @@ class TestAnalyzer(unittest.TestCase):
         self.assertEqual(len(extracted), 2)
         self.assertTrue(any("Python" in s or "Coding" in s for s in extracted))
 
+    def test_generate_local_summary_multi_perspective(self):
+        scraped_data = [
+            {
+                "url": "http://example.com/tech",
+                "title": "Technical Systems Spec",
+                "success": True,
+                "paragraphs": [
+                    "System testing is a key part of technology.",
+                    "Here is a second sentence about evaluation.",
+                    "We need a third sentence about safety.",
+                    "System analysis can discuss research designs.",
+                    "The evaluation presents project scopes.",
+                    "Safety explains baseline features.",
+                    "This system architecture is built in python using clean code plugins.",
+                    "We need an evaluation of the pricing and memory cost constraints for hardware ram.",
+                    "Ensure safety guidelines, compliance rules, and privacy cookies tos are met.",
+                    "Another system code implementation class is created."
+                ]
+            }
+        ]
+        summary = analyzer.generate_local_summary(scraped_data, "system evaluation", "safety")
+        self.assertIn("Technical Architecture & Core Mechanisms", summary)
+        self.assertIn("Feasibility & Resource Constraints", summary)
+        self.assertIn("Operational, Legal & Safety Perspectives", summary)
+
+    def test_generate_local_summary_incremental_append(self):
+        prev_report = "# Original Report\n## Sources Scraped\n| 1 | Old Source | http://old.com | Success |"
+        scraped_data = [
+            {
+                "url": "http://new.com",
+                "title": "New Source",
+                "success": True,
+                "paragraphs": [
+                    "This is a completely brand new incremental finding about system updates."
+                ]
+            }
+        ]
+        summary = analyzer.generate_local_summary(scraped_data, "system updates", "delta", previous_report=prev_report)
+        self.assertIn("Incremental Update (Local", summary)
+        self.assertIn("completely brand new incremental finding", summary)
+
 if __name__ == '__main__':
     unittest.main()
+

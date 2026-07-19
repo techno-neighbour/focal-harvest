@@ -52,7 +52,7 @@ def show_banner():
     banner_panel = Panel(
         Align.center(gradient_text),
         border_style="bright_blue",
-        subtitle="v1.3.0 • Local extractive summarizer, SSR Extractors, & AI Engine ready"
+        subtitle="v1.4.0 • Query Decomposition, STORM Synthesis, Incremental Living Logs, & Document Exporters"
     )
     console.print(banner_panel)
 
@@ -276,15 +276,28 @@ def browse_reports_menu():
         console.clear()
         show_banner()
         
-        reports_dir = "reports"
-        if not os.path.exists(reports_dir):
-            console.print("[yellow]No reports directory found. Run a scraper session first![/yellow]")
-            Prompt.ask("Press Enter to go back")
-            break
+        reports_dir = os.path.join("reports", "markdown")
+        os.makedirs(reports_dir, exist_ok=True)
+        os.makedirs(os.path.join("reports", "json"), exist_ok=True)
+        os.makedirs(os.path.join("reports", "pdf"), exist_ok=True)
+        os.makedirs(os.path.join("reports", "docx"), exist_ok=True)
+        
+        # Auto-migrate legacy files directly under reports/ into subfolders
+        if os.path.exists("reports"):
+            for legacy_md in glob.glob(os.path.join("reports", "*.md")):
+                try:
+                    os.rename(legacy_md, os.path.join(reports_dir, os.path.basename(legacy_md)))
+                except Exception:
+                    pass
+            for legacy_json in glob.glob(os.path.join("reports", "*.json")):
+                try:
+                    os.rename(legacy_json, os.path.join("reports", "json", os.path.basename(legacy_json)))
+                except Exception:
+                    pass
             
         md_files = glob.glob(os.path.join(reports_dir, "*.md"))
         if not md_files:
-            console.print("[yellow]No saved reports (*.md) found in reports/ directory.[/yellow]")
+            console.print("[yellow]No saved reports (*.md) found in reports/markdown/ directory.[/yellow]")
             Prompt.ask("Press Enter to go back")
             break
             
@@ -349,8 +362,9 @@ def execute_scrape_flow(
     spec_topic: str, 
     urls: List[str], 
     config: Dict[str, Any], 
-    previous_hash: Optional[str] = None
-) -> Tuple[Optional[str], str]:
+    previous_hash: Optional[str] = None,
+    previous_report_path: Optional[str] = None
+) -> Tuple[Optional[str], str, Optional[str]]:
     """Core logic to search, scrape, analyze, and notify."""
     logger.info("Initializing scrape flow execution for query: '%s', focus: '%s'", query, spec_topic)
     search_engine = config.get("search_engine", "duckduckgo")
@@ -384,7 +398,7 @@ def execute_scrape_flow(
                 if dispatch_res["telegram"]:
                     console.print("[green]✔ Telegram notification dispatched successfully![/green]")
                     
-                return res["report"], ""
+                return res["report"], "", dispatch_res['saved_paths']['markdown_path']
             else:
                 logger.error("AI Search Grounding failed: %s. Falling back to normal crawler.", res.get('error'))
                 console.print(f"[red]❌ AI Search Grounding failed: {res['error']}. Falling back to normal crawler...[/red]")
@@ -492,27 +506,39 @@ def execute_scrape_flow(
     
     if previous_hash is not None and current_hash == previous_hash:
         logger.info("Incremental check: Current scraped content matches previous run hash (%s). Skipping LLM generation.", current_hash)
-        return None, current_hash
+        return None, current_hash, previous_report_path
         
     # Phase 3: Synthesis & Analysis
     logger.info("Proceeding to Phase 3: LLM Synthesis and Analysis.")
+    previous_report_content = None
+    if previous_report_path and os.path.exists(previous_report_path):
+        try:
+            with open(previous_report_path, "r", encoding="utf-8") as f:
+                previous_report_content = f.read()
+        except Exception as e:
+            logger.warning("Failed to read previous report for incremental update: %s", str(e))
+            
     with console.status("[bold cyan]Analyzing web content and synthesizing report...[/bold cyan]"):
-        report = analyzer.synthesize_topics(scraped_data, query, spec_topic)
+        report = analyzer.synthesize_topics(scraped_data, query, spec_topic, previous_report=previous_report_content)
         
     # Phase 4: Dispatch Notifications and save files
     logger.info("Proceeding to Phase 4: Notification dispatch and report saving.")
     with console.status("[bold cyan]Saving report and dispatching notification triggers...[/bold cyan]"):
-        dispatch_res = notifier.dispatch_notifications(query, spec_topic, report, scraped_data, config)
+        dispatch_res = notifier.dispatch_notifications(query, spec_topic, report, scraped_data, config, previous_report_path=previous_report_path)
         
     console.print(f"[bold green]✔ Saved Markdown Report to: {dispatch_res['saved_paths']['markdown_path']}[/bold green]")
     console.print(f"[bold green]✔ Saved Raw Data JSON to: {dispatch_res['saved_paths']['json_path']}[/bold green]")
+    if dispatch_res['saved_paths'].get('pdf_path'):
+        console.print(f"[bold green]✔ Saved PDF Document to: {dispatch_res['saved_paths']['pdf_path']}[/bold green]")
+    if dispatch_res['saved_paths'].get('docx_path'):
+        console.print(f"[bold green]✔ Saved Word (DOCX) Document to: {dispatch_res['saved_paths']['docx_path']}[/bold green]")
     
     if dispatch_res["discord"]:
         console.print("[green]✔ Discord webhook alert dispatched successfully![/green]")
     if dispatch_res["telegram"]:
         console.print("[green]✔ Telegram notification dispatched successfully![/green]")
         
-    return report, current_hash
+    return report, current_hash, dispatch_res['saved_paths']['markdown_path']
 
 def single_scrape_menu():
     """Handles the user inputs to trigger a single scrape and deep dive run."""
@@ -600,6 +626,7 @@ def scheduler_menu():
     
     run_count = 0
     last_run_hashes = {}
+    last_run_paths = {}
     query_key = f"{query}||{spec_topic}"
     try:
         while True:
@@ -610,8 +637,11 @@ def scheduler_menu():
             
             try:
                 prev_hash = last_run_hashes.get(query_key)
-                report, new_hash = execute_scrape_flow(query, spec_topic, [], config, previous_hash=prev_hash)
+                prev_path = last_run_paths.get(query_key)
+                report, new_hash, report_path = execute_scrape_flow(query, spec_topic, [], config, previous_hash=prev_hash, previous_report_path=prev_path)
                 last_run_hashes[query_key] = new_hash
+                if report_path:
+                    last_run_paths[query_key] = report_path
                 
                 if report is None:
                     logger.info("Scheduler: Run #%d complete. No new content changes detected. Webhooks bypassed.", run_count)

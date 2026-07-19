@@ -1,7 +1,8 @@
 import re
 import os
 import requests
-from typing import List, Dict, Any, Set
+import datetime
+from typing import List, Dict, Any, Set, Optional
 from collections import Counter
 import math
 import utils
@@ -65,11 +66,46 @@ def score_sentence(sentence: str, keywords: Set[str], position_weight: float) ->
     score = (unique_matches * 2.0 + match_count * 0.5) * density * length_penalty * position_weight
     return score
 
-def generate_local_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str) -> str:
+def generate_local_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, previous_report: Optional[str] = None) -> str:
     """
     Performs local, rule-based extractive summarization and outputs a beautiful,
-    well-structured Markdown deep dive report.
+    well-structured Markdown deep dive report. Supports incremental report appends.
     """
+    if previous_report and previous_report.strip():
+        keywords = extract_keywords(query) | extract_keywords(spec_topic)
+        all_sentences = []
+        for doc_idx, doc in enumerate(scraped_data):
+            if not doc.get("success") or not doc.get("paragraphs"):
+                continue
+            for p in doc["paragraphs"]:
+                for s in split_into_sentences(p):
+                    score = score_sentence(s, keywords, 1.0)
+                    if score > 0.05:
+                        all_sentences.append({"text": s, "score": score, "url": doc["url"]})
+                        
+        all_sentences.sort(key=lambda x: x["score"], reverse=True)
+        prev_lower = previous_report.lower()
+        new_delta_sentences = []
+        for s in all_sentences:
+            if s["text"].lower() not in prev_lower:
+                new_delta_sentences.append(s)
+                if len(new_delta_sentences) >= 5:
+                    break
+                    
+        if not new_delta_sentences:
+            return previous_report
+            
+        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        delta_lines = [f"\n\n## 🔄 Incremental Update (Local - {timestamp_str})\n"]
+        for s in new_delta_sentences:
+            delta_lines.append(f"- {s['text']} *([Source]({s['url']}))*")
+            
+        if "## Sources Scraped" in previous_report:
+            parts = previous_report.rsplit("## Sources Scraped", 1)
+            return parts[0] + "\n".join(delta_lines) + "\n\n## Sources Scraped" + parts[1]
+        else:
+            return previous_report + "\n".join(delta_lines)
+
     keywords = extract_keywords(query) | extract_keywords(spec_topic)
     
     all_sentences_with_meta = []
@@ -142,22 +178,65 @@ def generate_local_summary(scraped_data: List[Dict[str, Any]], query: str, spec_
         
     markdown_lines.append("\n## Key Insights & Detailed Synthesis\n")
     
-    # Group findings by topic or source
-    source_sentences = {}
+    # Category Keyword Lists
+    tech_keywords = {"system", "architecture", "code", "plugin", "python", "api", "tls", "regex", "framework", "database", "git", "implementation", "class", "function", "method", "parser"}
+    feasibility_keywords = {"cost", "pricing", "rate limit", "rpm", "tpm", "memory", "ram", "gpu", "hardware", "speed", "latency", "free", "performance", "limit", "bound", "run"}
+    safety_keywords = {"security", "legal", "compliance", "terms", "privacy", "tos", "waf", "cloudflare", "cookies", "user-agent", "block", "restrict", "captcha", "ban", "safe"}
+
+    tech_sentences = []
+    feasibility_sentences = []
+    safety_sentences = []
+    uncategorized_sentences = []
+
     for s in unique_sentences[6:15]:
-        source_title = s["source_title"]
-        if source_title not in source_sentences:
-            source_sentences[source_title] = []
-        source_sentences[source_title].append(s)
+        text_lower = s["text"].lower()
+        words = set(re.findall(r'\b\w+\b', text_lower))
         
-    if source_sentences:
-        for title, s_list in source_sentences.items():
-            url = s_list[0]["source_url"]
-            markdown_lines.append(f"### Findings from [{title}]({url})")
-            for s in s_list:
-                markdown_lines.append(f"- {s['text']}")
-            markdown_lines.append("")
-    else:
+        # Check overlap
+        is_tech = bool(words & tech_keywords)
+        is_feas = bool(words & feasibility_keywords)
+        is_safe = bool(words & safety_keywords)
+        
+        if is_tech:
+            tech_sentences.append(s)
+        elif is_feas:
+            feasibility_sentences.append(s)
+        elif is_safe:
+            safety_sentences.append(s)
+        else:
+            uncategorized_sentences.append(s)
+
+    has_sections = False
+    
+    if tech_sentences:
+        markdown_lines.append("### 🛠️ Technical Architecture & Core Mechanisms\n")
+        for s in tech_sentences:
+            markdown_lines.append(f"- {s['text']} *([Source]({s['source_url']}))*")
+        markdown_lines.append("")
+        has_sections = True
+        
+    if feasibility_sentences:
+        markdown_lines.append("### 📊 Feasibility & Resource Constraints\n")
+        for s in feasibility_sentences:
+            markdown_lines.append(f"- {s['text']} *([Source]({s['source_url']}))*")
+        markdown_lines.append("")
+        has_sections = True
+        
+    if safety_sentences:
+        markdown_lines.append("### 🛡️ Operational, Legal & Safety Perspectives\n")
+        for s in safety_sentences:
+            markdown_lines.append(f"- {s['text']} *([Source]({s['source_url']}))*")
+        markdown_lines.append("")
+        has_sections = True
+        
+    if uncategorized_sentences:
+        markdown_lines.append("### 💡 General Findings & Discussions\n")
+        for s in uncategorized_sentences:
+            markdown_lines.append(f"- {s['text']} *([Source]({s['source_url']}))*")
+        markdown_lines.append("")
+        has_sections = True
+        
+    if not has_sections:
         markdown_lines.append("*Refer to sources table below for specific references.*")
         
     # Sources Table
@@ -335,7 +414,7 @@ def filter_dense_context(raw_text: str, query: str, spec_topic: str, max_sentenc
         
     return " ".join(selected_sentences)
 
-def generate_gemini_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str, raise_on_error: bool = False) -> str:
+def generate_gemini_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str, raise_on_error: bool = False, previous_report: Optional[str] = None) -> str:
     """
     Queries Gemini 1.5 Flash using direct HTTP requests to synthesize the scraped text content
     into a gorgeous, highly structured and professional Markdown Deep Dive report.
@@ -360,7 +439,30 @@ def generate_gemini_summary(scraped_data: List[Dict[str, Any]], query: str, spec
             
     context_str = "\n".join(context_parts)
     
-    prompt = f"""You are a professional research assistant. Analyze the scraped web content below and generate a deep-dive research report.
+    if previous_report and previous_report.strip():
+        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        prompt = f"""You are a professional research assistant. Below is a previously compiled research report, followed by newly scraped web data.
+
+User's Original Query: {query}
+Specific Information Needed/Focus: {spec_topic}
+
+[PREVIOUS REPORT]
+{previous_report}
+
+[NEW SCRAPED DATA]
+{context_str}
+
+Please perform an incremental update on the report:
+1. Compare the new scraped data against the [PREVIOUS REPORT]. If there are new findings, technical details, or updates:
+   - Preserve the original report structure and content.
+   - Append a new section: `## 🔄 Incremental Update ({timestamp_str})` at the bottom of the report (before the Sources table).
+   - Write a concise list of new findings, updates, and added technical details under this section.
+   - Update the 'Sources Scraped' table at the very end to include any newly scraped sources.
+2. If there are no new findings or details, return the [PREVIOUS REPORT] completely unchanged.
+3. Write only the Markdown report itself, no wrapping conversational text. Ensure it is clean, comprehensive, and detailed.
+"""
+    else:
+        prompt = f"""You are a professional research assistant. Analyze the scraped web content below and generate a deep-dive research report.
 
 User's Original Query: {query}
 Specific Information Needed/Focus: {spec_topic}
@@ -371,7 +473,10 @@ Scraped Data:
 Please synthesize the scraped data to write a detailed, highly structured Markdown report.
 Make sure to:
 1. Write a professional title and a compelling Executive Summary.
-2. Structure the body with clear headings and bullet points answering the user's specific information needs.
+2. Structure the body systematically into three distinct perspective sections:
+   - `### 🛠️ Technical Architecture & Core Mechanisms`: Code structures, technical designs, systems design, and core mechanisms.
+   - `### 📊 Feasibility & Resource Constraints`: Pricing, operational overhead, hardware/RAM limits, speed, and latency.
+   - `### 🛡️ Operational, Legal & Safety Perspectives`: Privacy concerns, compliance/terms boundaries, security, and usage protocols.
 3. Cite sources dynamically using Markdown links pointing to the exact source URLs from the Scraped Data.
 4. Add a 'Key Takeaways' section.
 5. Create a 'Sources Scraped' Markdown table at the end showing the Title and URL of all sources.
@@ -408,7 +513,7 @@ Make sure to:
         fallback_msg = f"\n\n> [!WARNING]\n> Gemini API call failed: {str(e)}. Falling back to local/rule-based synthesis.\n\n"
         return fallback_msg + generate_local_summary(scraped_data, query, spec_topic)
 
-def generate_openai_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str, raise_on_error: bool = False) -> str:
+def generate_openai_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str, raise_on_error: bool = False, previous_report: Optional[str] = None) -> str:
     """
     Queries OpenAI's Chat Completion API (using gpt-4o-mini) to synthesize scraped content.
     """
@@ -432,7 +537,30 @@ def generate_openai_summary(scraped_data: List[Dict[str, Any]], query: str, spec
             
     context_str = "\n".join(context_parts)
     
-    prompt = f"""Analyze the scraped web content below and generate a deep-dive research report.
+    if previous_report and previous_report.strip():
+        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        prompt = f"""You are a professional research assistant. Below is a previously compiled research report, followed by newly scraped web data.
+
+User's Original Query: {query}
+Specific Information Needed/Focus: {spec_topic}
+
+[PREVIOUS REPORT]
+{previous_report}
+
+[NEW SCRAPED DATA]
+{context_str}
+
+Please perform an incremental update on the report:
+1. Compare the new scraped data against the [PREVIOUS REPORT]. If there are new findings, technical details, or updates:
+   - Preserve the original report structure and content.
+   - Append a new section: `## 🔄 Incremental Update ({timestamp_str})` at the bottom of the report (before the Sources table).
+   - Write a concise list of new findings, updates, and added technical details under this section.
+   - Update the 'Sources Scraped' table at the very end to include any newly scraped sources.
+2. If there are no new findings or details, return the [PREVIOUS REPORT] completely unchanged.
+3. Write only the Markdown report itself, no wrapping conversational text. Ensure it is clean, comprehensive, and detailed.
+"""
+    else:
+        prompt = f"""Analyze the scraped web content below and generate a deep-dive research report.
 
 User's Original Query: {query}
 Specific Information Needed/Focus: {spec_topic}
@@ -441,7 +569,16 @@ Scraped Data:
 {context_str}
 
 Please synthesize the scraped data to write a detailed, highly structured Markdown report.
-Ensure you add a 'Sources Scraped' table at the end and dynamically cite sources with URLs.
+Make sure to:
+1. Write a professional title and a compelling Executive Summary.
+2. Structure the body systematically into three distinct perspective sections:
+   - `### 🛠️ Technical Architecture & Core Mechanisms`: Code structures, technical designs, systems design, and core mechanisms.
+   - `### 📊 Feasibility & Resource Constraints`: Pricing, operational overhead, hardware/RAM limits, speed, and latency.
+   - `### 🛡️ Operational, Legal & Safety Perspectives`: Privacy concerns, compliance/terms boundaries, security, and usage protocols.
+3. Cite sources dynamically using Markdown links pointing to the exact source URLs from the Scraped Data.
+4. Add a 'Key Takeaways' section.
+5. Create a 'Sources Scraped' Markdown table at the end showing the Title and URL of all sources.
+6. Write only the Markdown report itself, no wrapping conversational text. Ensure it is clean, comprehensive, and detailed.
 """
 
     url = "https://api.openai.com/v1/chat/completions"
@@ -471,7 +608,7 @@ Ensure you add a 'Sources Scraped' table at the end and dynamically cite sources
         fallback_msg = f"\n\n> [!WARNING]\n> OpenAI API call failed: {str(e)}. Falling back to local/rule-based synthesis.\n\n"
         return fallback_msg + generate_local_summary(scraped_data, query, spec_topic)
 
-def generate_claude_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str, raise_on_error: bool = False) -> str:
+def generate_claude_summary(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, api_key: str, raise_on_error: bool = False, previous_report: Optional[str] = None) -> str:
     """
     Queries Anthropic's Messages API (using claude-3-5-sonnet-20241022) to synthesize scraped content.
     """
@@ -495,7 +632,30 @@ def generate_claude_summary(scraped_data: List[Dict[str, Any]], query: str, spec
             
     context_str = "\n".join(context_parts)
     
-    prompt = f"""Analyze the scraped web content below and generate a deep-dive research report.
+    if previous_report and previous_report.strip():
+        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        prompt = f"""You are a professional research assistant. Below is a previously compiled research report, followed by newly scraped web data.
+
+User's Original Query: {query}
+Specific Information Needed/Focus: {spec_topic}
+
+[PREVIOUS REPORT]
+{previous_report}
+
+[NEW SCRAPED DATA]
+{context_str}
+
+Please perform an incremental update on the report:
+1. Compare the new scraped data against the [PREVIOUS REPORT]. If there are new findings, technical details, or updates:
+   - Preserve the original report structure and content.
+   - Append a new section: `## 🔄 Incremental Update ({timestamp_str})` at the bottom of the report (before the Sources table).
+   - Write a concise list of new findings, updates, and added technical details under this section.
+   - Update the 'Sources Scraped' table at the very end to include any newly scraped sources.
+2. If there are no new findings or details, return the [PREVIOUS REPORT] completely unchanged.
+3. Write only the Markdown report itself, no wrapping conversational text. Ensure it is clean, comprehensive, and detailed.
+"""
+    else:
+        prompt = f"""Analyze the scraped web content below and generate a deep-dive research report.
 
 User's Original Query: {query}
 Specific Information Needed/Focus: {spec_topic}
@@ -504,7 +664,16 @@ Scraped Data:
 {context_str}
 
 Please synthesize the scraped data to write a detailed, highly structured Markdown report.
-Ensure you add a 'Sources Scraped' table at the end and dynamically cite sources with URLs.
+Make sure to:
+1. Write a professional title and a compelling Executive Summary.
+2. Structure the body systematically into three distinct perspective sections:
+   - `### 🛠️ Technical Architecture & Core Mechanisms`: Code structures, technical designs, systems design, and core mechanisms.
+   - `### 📊 Feasibility & Resource Constraints`: Pricing, operational overhead, hardware/RAM limits, speed, and latency.
+   - `### 🛡️ Operational, Legal & Safety Perspectives`: Privacy concerns, compliance/terms boundaries, security, and usage protocols.
+3. Cite sources dynamically using Markdown links pointing to the exact source URLs from the Scraped Data.
+4. Add a 'Key Takeaways' section.
+5. Create a 'Sources Scraped' Markdown table at the end showing the Title and URL of all sources.
+6. Write only the Markdown report itself, no wrapping conversational text. Ensure it is clean, comprehensive, and detailed.
 """
 
     url = "https://api.anthropic.com/v1/messages"
@@ -536,11 +705,12 @@ Ensure you add a 'Sources Scraped' table at the end and dynamically cite sources
         fallback_msg = f"\n\n> [!WARNING]\n> Anthropic Claude API call failed: {str(e)}. Falling back to local/rule-based synthesis.\n\n"
         return fallback_msg + generate_local_summary(scraped_data, query, spec_topic)
 
-def synthesize_topics(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str) -> str:
+def synthesize_topics(scraped_data: List[Dict[str, Any]], query: str, spec_topic: str, previous_report: Optional[str] = None) -> str:
     """
     Orchestrates the synthesis step. Automatically routes to the selected AI provider based on 
     config priority (Gemini -> OpenAI -> Claude) if key is present, with multi-provider failover.
     Falls back to local synthesis only if all configured third-party LLM API calls fail or are missing.
+    Supports incremental updates via previous_report.
     """
     logger.info("Starting AI synthesis for query: '%s' (Focus: '%s'). Loaded %d source(s) to analyze.", query, spec_topic, len(scraped_data))
     # Import config to check settings dynamically
@@ -588,14 +758,14 @@ def synthesize_topics(scraped_data: List[Dict[str, Any]], query: str, spec_topic
     # If preferred provider is 'local', we skip LLM providers and go straight to local summary
     if preferred == "local":
         logger.info("Routing synthesis to local keyword summary (preferred)...")
-        return generate_local_summary(scraped_data, query, spec_topic)
+        return generate_local_summary(scraped_data, query, spec_topic, previous_report=previous_report)
         
     errors = []
     for provider_name in attempt_order:
         info = providers_info[provider_name]
         logger.info("Routing synthesis to %s...", info["name"])
         try:
-            return info["fn"](scraped_data, query, spec_topic, info["key"], raise_on_error=True)
+            return info["fn"](scraped_data, query, spec_topic, info["key"], raise_on_error=True, previous_report=previous_report)
         except Exception as e:
             err_msg = f"{info['name']} failed: {str(e)}"
             errors.append(err_msg)
@@ -606,10 +776,10 @@ def synthesize_topics(scraped_data: List[Dict[str, Any]], query: str, spec_topic
         for err in errors:
             fallback_msg += f"> * {err}\n"
         fallback_msg += "> Falling back to local/rule-based synthesis.\n\n"
-        return fallback_msg + generate_local_summary(scraped_data, query, spec_topic)
+        return fallback_msg + generate_local_summary(scraped_data, query, spec_topic, previous_report=previous_report)
         
     logger.warning("No third-party LLM API keys found. Falling back to local keyword synthesis...")
-    return generate_local_summary(scraped_data, query, spec_topic)
+    return generate_local_summary(scraped_data, query, spec_topic, previous_report=previous_report)
 
 def generate_gemini_grounding_search(query: str, spec_topic: str, api_key: str) -> Dict[str, Any]:
     """
@@ -628,7 +798,10 @@ Focus Area & Specific Questions: {spec_topic}
 
 Make sure to:
 1. Write a professional title and a compelling Executive Summary.
-2. Structure the body with clear headings and bullet points answering the user's specific information needs.
+2. Structure the body systematically into three distinct perspective sections:
+   - `### 🛠️ Technical Architecture & Core Mechanisms`: Code structures, technical designs, systems design, and core mechanisms.
+   - `### 📊 Feasibility & Resource Constraints`: Pricing, operational overhead, hardware/RAM limits, speed, and latency.
+   - `### 🛡️ Operational, Legal & Safety Perspectives`: Privacy concerns, compliance/terms boundaries, security, and usage protocols.
 3. Cite the exact websites and URLs you find in real time.
 4. Add a 'Key Takeaways' section.
 5. Create a 'Sources Scraped' Markdown table at the end listing the titles and URLs of sources used.

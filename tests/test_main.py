@@ -75,7 +75,7 @@ class TestMain(unittest.TestCase):
             "gemini_api_key": "fake-key"
         }
         
-        report, hash_val = main.execute_scrape_flow("query", "topic", [], config)
+        report, hash_val, report_path = main.execute_scrape_flow("query", "topic", [], config)
         self.assertEqual(report, "# Grounded Report")
         self.assertEqual(hash_val, "")
         mock_grounding.assert_called_once_with("query", "topic", "fake-key")
@@ -100,8 +100,8 @@ class TestMain(unittest.TestCase):
         mock_synthesize.return_value = "# Synthesized Report"
         mock_dispatch.return_value = {
             "saved_paths": {
-                "markdown_path": "reports/report.md",
-                "json_path": "reports/raw.json"
+                "markdown_path": "reports/markdown/report.md",
+                "json_path": "reports/json/raw.json"
             },
             "discord": False,
             "telegram": False
@@ -112,9 +112,10 @@ class TestMain(unittest.TestCase):
             "default_max_results": 2
         }
         
-        report, hash_val = main.execute_scrape_flow("query", "topic", [], config)
+        report, hash_val, report_path = main.execute_scrape_flow("query", "topic", [], config)
         self.assertEqual(report, "# Synthesized Report")
         self.assertTrue(len(hash_val) == 32)
+        self.assertEqual(report_path, "reports/markdown/report.md")
         # Verify candidate pool size is max_results * 3
         mock_search_ddg.assert_called_once_with("query", max_results=6)
         mock_scrape.assert_called_once()

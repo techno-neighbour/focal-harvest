@@ -3,7 +3,7 @@ import sys
 import os
 
 CORE_REQS = "requirements.txt"
-OPTIONAL_PACKAGES = ["curl_cffi", "rookiepy"]
+OPTIONAL_PACKAGES = ["curl_cffi", "rookiepy", "reportlab", "python-docx"]
 
 def run_install():
     print("  Focal Harvest Dependency Installer  \n")

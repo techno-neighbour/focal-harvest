@@ -2,28 +2,42 @@ import os
 import json
 import datetime
 import requests
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import utils
+import exporter
 logger = utils.setup_logging()
 from rich.console import Console
 from rich.markdown import Markdown
 
 console = Console()
 
-def save_report_to_files(query: str, spec_topic: str, markdown_content: str, scraped_data: List[Dict[str, Any]]) -> Dict[str, str]:
+def save_report_to_files(query: str, spec_topic: str, markdown_content: str, scraped_data: List[Dict[str, Any]], previous_report_path: Optional[str] = None) -> Dict[str, str]:
     """
-    Saves the final report as a Markdown file and the raw scraped data as a JSON file
-    in a local 'reports' directory.
+    Saves the final report as a Markdown file, JSON data, PDF document, and DOCX document
+    in local 'reports' subdirectories. Overwrites previous report if previous_report_path is given.
     """
-    # Create reports directory if it doesn't exist
-    os.makedirs("reports", exist_ok=True)
+    # Create designated subdirectories if they don't exist
+    md_dir = os.path.join("reports", "markdown")
+    json_dir = os.path.join("reports", "json")
+    pdf_dir = os.path.join("reports", "pdf")
+    docx_dir = os.path.join("reports", "docx")
+    os.makedirs(md_dir, exist_ok=True)
+    os.makedirs(json_dir, exist_ok=True)
+    os.makedirs(pdf_dir, exist_ok=True)
+    os.makedirs(docx_dir, exist_ok=True)
     
     # Generate slug for filename
     safe_query = "".join([c if c.isalnum() else "_" for c in query.lower()[:30]])
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    md_filename = f"reports/report_{safe_query}_{timestamp}.md"
-    json_filename = f"reports/raw_data_{safe_query}_{timestamp}.json"
+    if previous_report_path and os.path.exists(previous_report_path):
+        md_filename = previous_report_path
+        base_md_name = os.path.basename(previous_report_path)
+        base_json_name = base_md_name.replace(".md", ".json").replace("report_", "raw_data_")
+        json_filename = os.path.join(json_dir, base_json_name)
+    else:
+        md_filename = os.path.join(md_dir, f"report_{safe_query}_{timestamp}.md")
+        json_filename = os.path.join(json_dir, f"raw_data_{safe_query}_{timestamp}.json")
     
     logger.info("Saving generated report to files: '%s' and '%s'", md_filename, json_filename)
     
@@ -41,9 +55,21 @@ def save_report_to_files(query: str, spec_topic: str, markdown_content: str, scr
     with open(json_filename, "w", encoding="utf-8") as f:
         json.dump(json_payload, f, indent=2, ensure_ascii=False)
         
+    # Generate PDF export
+    pdf_filename = os.path.join(pdf_dir, f"report_{safe_query}_{timestamp}.pdf")
+    pdf_success = exporter.export_markdown_to_pdf(markdown_content, pdf_filename)
+    pdf_path = pdf_filename if pdf_success else None
+
+    # Generate DOCX export
+    docx_filename = os.path.join(docx_dir, f"report_{safe_query}_{timestamp}.docx")
+    docx_success = exporter.export_markdown_to_docx(markdown_content, docx_filename)
+    docx_path = docx_filename if docx_success else None
+        
     return {
         "markdown_path": md_filename,
-        "json_path": json_filename
+        "json_path": json_filename,
+        "pdf_path": pdf_path,
+        "docx_path": docx_path
     }
 
 def print_to_console(markdown_content: str) -> None:
@@ -149,14 +175,15 @@ def dispatch_notifications(
     spec_topic: str, 
     markdown_content: str, 
     scraped_data: List[Dict[str, Any]], 
-    config: Dict[str, Any]
+    config: Dict[str, Any],
+    previous_report_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Saves report files and dispatches notifications via console, discord, and telegram 
     based on config options.
     """
     logger.info("Starting report notification dispatch router...")
-    saved_paths = save_report_to_files(query, spec_topic, markdown_content, scraped_data)
+    saved_paths = save_report_to_files(query, spec_topic, markdown_content, scraped_data, previous_report_path=previous_report_path)
     
     results = {
         "saved_paths": saved_paths,
