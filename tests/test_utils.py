@@ -202,5 +202,22 @@ class TestUtils(unittest.TestCase):
             self.assertIn("headers", kwargs)
             self.assertEqual(kwargs["headers"].get("Cookie"), "reddit_session=foo_netscape")
 
+    def test_decompose_query_locally_comparison(self):
+        query = "Gemini 1.5 Flash vs Gemini 1.5 Pro"
+        sub_queries = utils.decompose_query_locally(query)
+        self.assertEqual(len(sub_queries), 5)
+        self.assertEqual(sub_queries[0], query)
+        self.assertIn("Gemini 1.5 Flash vs Gemini 1.5 Pro pricing cost", sub_queries)
+        self.assertIn("Gemini 1.5 Flash vs Gemini 1.5 Pro latency speed benchmarks", sub_queries)
+
+    def test_decompose_query_locally_informational(self):
+        query = "How to optimize FastAPI performance for high traffic"
+        sub_queries = utils.decompose_query_locally(query)
+        self.assertEqual(len(sub_queries), 5)
+        self.assertEqual(sub_queries[0], query)
+        self.assertIn("optimize fastapi performance high guide documentation tutorial", sub_queries)
+        self.assertIn("optimize fastapi performance high code examples github implementation", sub_queries)
+
 if __name__ == '__main__':
     unittest.main()
+

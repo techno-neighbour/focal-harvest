@@ -52,7 +52,7 @@ def show_banner():
     banner_panel = Panel(
         Align.center(gradient_text),
         border_style="bright_blue",
-        subtitle="v1.2.0 • Local extractive summarizer, SSR Extractors, & AI Engine ready"
+        subtitle="v1.3.0 • Local extractive summarizer, SSR Extractors, & AI Engine ready"
     )
     console.print(banner_panel)
 
@@ -115,9 +115,10 @@ def configure_settings_menu():
         table.add_row("12", "Auto-Extract Cookies", auto_extract_status)
         table.add_row("13", "Target Browser Source", browser_src_val)
         table.add_row("14", "Configure Universal Cookie Map", cookie_map_status)
+        table.add_row("15", "Research Depth Mode", config.get("research_depth", "quick").upper())
         
         console.print(table)
-        console.print("[cyan]Choose a setting to modify (1-14), or type [bold green]back[/bold green] to return to the main menu.[/cyan]")
+        console.print("[cyan]Choose a setting to modify (1-15), or type [bold green]back[/bold green] to return to the main menu.[/cyan]")
         
         choice = Prompt.ask("Your selection", default="back")
         if choice.lower() == "back":
@@ -257,6 +258,9 @@ def configure_settings_menu():
                         time.sleep(1)
             # Skip standard saved confirmation because it was handled inside the loop
             continue
+        elif choice == "15":
+            depth = Prompt.ask("Choose Research Depth (quick, deep)", choices=["quick", "deep"], default=config.get("research_depth", "quick"))
+            config["research_depth"] = depth
         else:
             console.print("[red]Invalid choice.[/red]")
             time.sleep(1)
@@ -394,20 +398,51 @@ def execute_scrape_flow(
         tavily_key = config.get("tavily_api_key") or os.environ.get("TAVILY_API_KEY")
         engine_name = "Tavily Search API" if (search_engine == "tavily" and tavily_key) else "DuckDuckGo"
         
-        # Query for a larger candidate pool to support Adaptive Replenishment
-        candidate_pool_size = max_res * 3
-        with console.status(f"[bold cyan]Searching {engine_name} for: '{query}'...[/bold cyan]"):
-            if engine_name == "Tavily Search API":
-                search_results = scraper.search_tavily(query, tavily_key, max_results=candidate_pool_size)
-            else:
-                search_results = scraper.search_duckduckgo(query, max_results=candidate_pool_size)
+        # Check research depth config
+        research_depth = config.get("research_depth", "quick")
+        search_results = []
+        seen_urls = set()
+        
+        if research_depth == "deep":
+            sub_queries = utils.decompose_query_locally(query)
+            console.print(f"\n[bold cyan]🔍 Deep Research Mode: Decomposed query into {len(sub_queries)} search aspects:[/bold cyan]")
+            for sq in sub_queries:
+                console.print(f"  • [yellow]{sq}[/yellow]")
+            console.print("")
+            
+            # Query for a slightly smaller candidate pool size per query, and aggregate
+            candidate_pool_size = max(3, max_res)
+            
+            for idx, sq in enumerate(sub_queries):
+                if idx > 0:
+                    # Rate limiting precaution sleep between sub-queries
+                    time.sleep(1.0)
+                with console.status(f"[bold cyan]({idx+1}/{len(sub_queries)}) Searching {engine_name} for: '{sq}'...[/bold cyan]"):
+                    if engine_name == "Tavily Search API":
+                        res = scraper.search_tavily(sq, tavily_key, max_results=candidate_pool_size)
+                    else:
+                        res = scraper.search_duckduckgo(sq, max_results=candidate_pool_size)
+                if res:
+                    for item in res:
+                        url = item["url"]
+                        if url not in seen_urls:
+                            seen_urls.add(url)
+                            search_results.append(item)
+        else:
+            # Default quick mode: single query
+            candidate_pool_size = max_res * 3
+            with console.status(f"[bold cyan]Searching {engine_name} for: '{query}'...[/bold cyan]"):
+                if engine_name == "Tavily Search API":
+                    search_results = scraper.search_tavily(query, tavily_key, max_results=candidate_pool_size)
+                else:
+                    search_results = scraper.search_duckduckgo(query, max_results=candidate_pool_size)
             
         if not search_results:
             logger.warning("No search results returned from search query.")
             console.print("[bold red]❌ No search results found. Check connection or try another topic.[/bold red]")
             return "", ""
             
-        console.print(f"[green]✔ Found {len(search_results)} candidate search results via {engine_name}.[/green]")
+        console.print(f"[green]✔ Found {len(search_results)} unique candidate search results via {engine_name}.[/green]")
         target_urls = [r["url"] for r in search_results]
     else:
         logger.info("Explicit URL list passed to execution flow: %s", str(urls))

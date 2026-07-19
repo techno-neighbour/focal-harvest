@@ -302,3 +302,50 @@ class TokenBucket:
                 needed = amount - current_tokens
                 sleep_time = needed / self.fill_rate
             time.sleep(max(0.1, sleep_time))
+
+def decompose_query_locally(query: str) -> list:
+    """
+    Decomposes a user query locally into 4-5 highly targeted sub-questions
+    or search vectors without making any external API calls.
+    """
+    import re
+    query_clean = query.strip()
+    
+    # 1. Detect Comparison Intent (matches "vs", "vs.", "compared to", etc.)
+    comparison_triggers = [r"\bvs\b", r"\bvs\.\b", r"\bcompared to\b", r"\bdifference between\b"]
+    is_comparison = False
+    connector = None
+    
+    for trigger in comparison_triggers:
+        match = re.search(trigger, query_clean, re.IGNORECASE)
+        if match:
+            is_comparison = True
+            connector = match.group(0)
+            break
+            
+    if is_comparison:
+        parts = re.split(re.escape(connector), query_clean, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            entity_a = parts[0].strip()
+            entity_b = parts[1].strip()
+            return [
+                query_clean,
+                f"{entity_a} vs {entity_b} pricing cost",
+                f"{entity_a} vs {entity_b} latency speed benchmarks",
+                f"{entity_a} vs {entity_b} features context window",
+                f"{entity_a} vs {entity_b} developer use cases reddit reviews"
+            ]
+
+    # 2. Informational Fallback (Noun Phrase keyword extraction)
+    stop_words = {"what", "is", "how", "to", "the", "a", "an", "and", "in", "on", "for", "with", "about", "why", "of"}
+    words = [w for w in re.findall(r"\b\w+\b", query_clean.lower()) if w not in stop_words]
+    core_topic = " ".join(words[:4]) if words else query_clean
+    
+    return [
+        query_clean,
+        f"{core_topic} guide documentation tutorial",
+        f"{core_topic} code examples github implementation",
+        f"{core_topic} problems bottlenecks errors issues",
+        f"{core_topic} best practices latest updates"
+    ]
+

@@ -25,7 +25,8 @@ DEFAULT_CONFIG = {
     "custom_user_agent": "",
     "universal_cookies": {},
     "auto_extract_cookies": False,
-    "browser_source": "any"
+    "browser_source": "any",
+    "research_depth": "quick"
 }
 
 
